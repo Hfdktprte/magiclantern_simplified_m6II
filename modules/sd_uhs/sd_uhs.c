@@ -8,6 +8,8 @@
 #include <console.h>
 #include <config.h>
 
+#include "sd_pll.h"
+
 /* camera-specific parameters */
 static uint32_t GPIO = 0;
 static uint32_t GPIO_cmp = 0;
@@ -34,6 +36,7 @@ static int sd_setup_mode_enable = 0;
 static int turned_on = 0;
 static CONFIG_INT("sd.sd_overclock", sd_overclock, 0);
 static CONFIG_INT("sd.sd_access_mode", access_mode, 1);
+CONFIG_INT("sd.SD_PLL_clock_choice", SD_PLL_clock_choice, 0);
 
 /* CID info hook, should work on all DIGIC 5 models */
 uint32_t MID;
@@ -652,6 +655,12 @@ static struct menu_entry sd_uhs_menu[] =
 
 static unsigned int sd_uhs_init()
 {
+    // Digic 4 cams we can't do UHS (yet?), but we can improve speeds
+    // by messing with clocks.
+    // We must use this init func initially since a module can only have one.
+    if (get_digic_version() == 4)
+        return init_SD_PLL();
+
     if (is_camera("5D3", "*"))
     {
         static const char *sd_choices_5d3[] = {"OFF", "160MHz", "192MHz (H)", "240MHz (H)"};
@@ -868,4 +877,5 @@ MODULE_INFO_END()
 MODULE_CONFIGS_START()
 MODULE_CONFIG(sd_overclock)
 MODULE_CONFIG(access_mode)
+MODULE_CONFIG(SD_PLL_clock_choice)
 MODULE_CONFIGS_END()

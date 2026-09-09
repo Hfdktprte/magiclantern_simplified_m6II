@@ -1,8 +1,12 @@
 SD overclocking
 ===============
 
-Change SD UHS access speeds, partly via accessing the SD device directly,
-partly via patching ROM used for normal DryOS configuration of the device.
+On Digic 5 bodies, change SD UHS access speeds, partly via accessing the SD
+device directly, partly via patching ROM used for normal DryOS configuration
+of the device.
+
+On Digic 4, a different clock is changed, with similar results.  No ROM
+patches are required.
 
 This is not well understood, mostly empirically determined.  There is
 definite risk.  Field tests suggest it is not very risky in practice;
