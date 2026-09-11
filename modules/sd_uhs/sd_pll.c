@@ -155,9 +155,9 @@ static void apply_selected_clock(void)
 
 unsigned int init_SD_PLL(void)
 {
-    // Very conservative: only enable on the tested 1100D for now.
+    // Only enable on tested cams.
     // Probably works on all D4 cams with SD slot.
-    if (!is_camera("1100D", "*"))
+    if (!is_camera("1100D", "*") && !is_camera("60D", "*"))
         return 0;
 
     SD_initialised = (MEM(CLOCK_SD_PLL_ADDR) == SD_PLL_STOCK);
