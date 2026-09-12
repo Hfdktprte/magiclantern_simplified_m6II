@@ -1,5 +1,5 @@
 # define the module name - make sure name is max 8 characters
-MODULE_NAME = sd_uhs
+MODULE_NAME = sd_clock
 MODULE_OBJS = $(BUILD_DIR)/sd_uhs.o $(BUILD_DIR)/sd_pll.o
 TOP_DIR = ../..
 
