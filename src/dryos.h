@@ -61,6 +61,8 @@ extern float powf(float x, float y);
  *
  * Return value is ((int16_t unknown << 16)|(uint16_t task_id)) << 1
  * i.e., to extract out task_id you do: (val >> 1) & 0xffff
+ * 
+ * Lower value priority are higher priority tasks.
  */
 extern uint32_t
 task_create(
@@ -79,6 +81,8 @@ task_create(
  *
  * Return value is ((int16_t unknown << 16)|(uint16_t task_id)) << 1
  * i.e., to extract out task_id you do: (val >> 1) & 0xffff
+ * 
+ * Lower value priority are higher priority tasks.
  */
 extern uint32_t
 task_create_ex(
@@ -316,6 +320,7 @@ uint32_t RequestRPC (uint32_t id, void* data, uint32_t length, uint32_t cb, uint
 #define WEAK_FUNC(name)  __attribute__((weak,alias(#name))) 
 static unsigned int ret_0() { return 0; }
 static unsigned int ret_1() { return 1; }
+static void ret_void() { return; }
 
 /** AF microadjustment **/
 int get_afma(int mode);

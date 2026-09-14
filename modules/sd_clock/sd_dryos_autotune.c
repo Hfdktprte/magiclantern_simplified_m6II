@@ -9,21 +9,19 @@
 // so presumably this autotune function is limited, or perhaps
 // deliberately cautious.
 
+#include "sd_dryos_autotune.h"
+
 #include "dryos.h"
 #include "menu.h"
 #include "config.h"
+#include "module.h"
 
-#ifdef FEATURE_SD_AUTOTUNE
-
-#if defined(CONFIG_MMU_REMAP) && defined(CONFIG_200D)
 #include "patch.h"
 static int is_patched = 0;
 
-#if !defined(CONFIG_FW_VERSION) || CONFIG_FW_VERSION != 101
-    #error "The mode_192 addresses for patching have only been found for fw 1.0.1.  You will need to validate them."
-#endif
+extern WEAK_FUNC(ret_void) void autotune_SD(void);
 
-struct patch mode_192[] =
+static struct patch mode_192[] =
 {
 // 200D has code to autotune SD speed, but there seems to be a bug.
 // There's an array which holds an index for selecting speed,
@@ -55,14 +53,27 @@ struct patch mode_192[] =
         .description = "Allow 156MHz SD speed (130)"
     },
 };
-#endif // CONFIG_MMU_REMAP && CONFIG_200D
 
-static CONFIG_INT("SD.enable_autotune_on_boot", is_autotune_enabled, 0);
+static void autotune_SD_task()
+{
+    extern int ml_started;
+    while (!ml_started)
+        msleep(100); // Don't run during early boot while OS is still configuring SD.
+                     // That seems to cause hangs.
+                     // This is running as a task so sleeping is fine.
+    if (!is_patched)
+    {
+        apply_patches(mode_192, COUNT(mode_192));
+        is_patched = 1;
+    }
+    extern void autotune_SD(void);
+    autotune_SD();
+}
 
 // Wraps DryOS function for ML.
 // Note this isn't "enable" - I'm not aware of a "disable"
 // function.  Presumably the card remains autotuned until next
-// restart, or should the card errors, when it will probably
+// restart, or should the card error, when it will probably
 // fallback to a lesser speed (this is speculation).
 //
 // Toggling the menu off -> on, will redo the autotune,
@@ -75,14 +86,7 @@ static void run_SD_autotune(void *priv_unused, int unused)
 
     if (is_autotune_enabled)
     {
-        #if defined(CONFIG_MMU_REMAP) && defined(CONFIG_200D)
-        if (!is_patched)
-        {
-            apply_patches(mode_192, COUNT(mode_192));
-            is_patched = 1;
-        }
-        #endif
-        autotune_SD();
+        task_create("sd_autotune", 0x1c, 0x600, &autotune_SD_task, NULL);
     }
 }
 
@@ -96,31 +100,22 @@ static struct menu_entry autotune_SD_speed_menu[] = {
     }
 };
 
-static void autotune_SD_init()
+unsigned int autotune_SD_init()
 {
-    menu_add("Prefs", autotune_SD_speed_menu, COUNT(autotune_SD_speed_menu));
-}
-
-static void autotune_SD_task()
-{
-    if (is_autotune_enabled)
+    if (is_camera("200D", "1.0.1"))
     {
-        msleep(1500); // Don't run during early boot while OS is still configuring SD.
-                      // That seems to cause hangs.
-                      // This is running as a task so sleeping is fine.
-        #if defined(CONFIG_MMU_REMAP) && defined(CONFIG_200D)
-        if (!is_patched)
-        {
-            apply_patches(mode_192, COUNT(mode_192));
-            is_patched = 1;
-        }
-        #endif
-        extern void autotune_SD(void);
-        autotune_SD();
+        // So far only seen on this cam.  The patches are cam and fw ver specific,
+        // if we ever expand this the code around mode_192 struct needs to be more
+        // generic.
+        if (is_autotune_enabled)
+            task_create("sd_autotune", 0x1c, 0x600, &autotune_SD_task, NULL);
     }
+    else
+    {
+        return 0;
+    }
+
+    menu_add("Prefs", autotune_SD_speed_menu, COUNT(autotune_SD_speed_menu));
+    return 0;
 }
 
-INIT_FUNC("SD_auto", autotune_SD_init);
-TASK_CREATE("sd_tune", autotune_SD_task, NULL, 0x1e, 0x400);
-
-#endif // FEATURE_SD_AUTOTUNE

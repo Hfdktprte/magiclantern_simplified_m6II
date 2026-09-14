@@ -9,6 +9,13 @@
 #include <config.h>
 
 #include "sd_pll.h"
+#include "sd_dryos_autotune.h"
+
+// D678X cams don't provide this symbol, it's for cache hack patching,
+// which they don't have.  D45 cams will override this with real code at link time.
+extern WEAK_FUNC(ret_0) int patch_hook_function(uintptr_t addr, uint32_t orig_instr,
+                                                patch_hook_function_cbr hook_function,
+                                                const char *description);
 
 /* camera-specific parameters */
 static uint32_t GPIO = 0;
@@ -37,6 +44,7 @@ static int turned_on = 0;
 static CONFIG_INT("sd.sd_overclock", sd_overclock, 0);
 static CONFIG_INT("sd.sd_access_mode", access_mode, 1);
 CONFIG_INT("sd.SD_PLL_clock_choice", SD_PLL_clock_choice, 0);
+CONFIG_INT("SD.enable_autotune_on_boot", is_autotune_enabled, 0);
 
 /* CID info hook, should work on all DIGIC 5 models */
 uint32_t MID;
@@ -661,6 +669,11 @@ static unsigned int sd_uhs_init()
     if (get_digic_version() == 4)
         return init_SD_PLL();
 
+    // This cam has a DryOS func to autotune SD speed at runtime.
+    // Doesn't need a restart.
+    if (is_camera("200D", "*"))
+        return autotune_SD_init();
+
     if (is_camera("5D3", "*"))
     {
         static const char *sd_choices_5d3[] = {"OFF", "160MHz", "192MHz (H)", "240MHz (H)"};
@@ -878,4 +891,5 @@ MODULE_CONFIGS_START()
 MODULE_CONFIG(sd_overclock)
 MODULE_CONFIG(access_mode)
 MODULE_CONFIG(SD_PLL_clock_choice)
+MODULE_CONFIG(is_autotune_enabled)
 MODULE_CONFIGS_END()
