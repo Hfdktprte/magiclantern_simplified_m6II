@@ -150,7 +150,8 @@ THUMB_FN(0xe0670eb6, PwrMng_WakeSubChips)
 THUMB_FN(0xe0670ee4, PwrMng_SuspendSubChips)
 THUMB_FN(0xe05b978a, CreateResLockEntry)
 THUMB_FN(0xe05b9972, LockEngineResources)
-THUMB_FN(0xe05b9a0c, UnLockEngineResources)
+/* function_overrides.c still exports a legacy dummy with the generic name. */
+THUMB_FN(0xe05b9a0c, M6II_UnLockEngineResources)
 
 /** DIGIC 8 EDMAC API (M6II ROM-mapped) **/
 THUMB_FN(0xe05bff40, ConnectReadEDmac_maybe)
