@@ -30,6 +30,9 @@
 #define FEATURE_GLOBAL_DRAW
 #define FEATURE_CROPMARKS
 
+// Bilal M50 RAW-video architecture: enable generic RAW LV core.
+#define CONFIG_RAW_LIVEVIEW
+
 // Enable remapping ROM pages to RAM
 #define CONFIG_SGI_HANDLERS
 #define CONFIG_MMU_REMAP
