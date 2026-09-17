@@ -14,12 +14,12 @@ MAIN_FIRMWARE_ADDR = 0xE0040000
 RESTARTSTART = 0xb8d20 # 0xb0078 in ROM
 
 # Cortex A9, binaries loaded as Thumb
-# RAW_LV_EDMAC_CHANNEL_ADDR now lives in consts.h, as in Bilal's M50 port.
-# Keep bpp fixed at native 14-bit until the M6II PackMode field is traced.
+# Keep Bilal's RAW core names untouched; camera metadata needed by raw.c is
+# supplied from raw_compat.h. Do not predefine PACK32_MODE/MODE_* here because
+# Bilal's DIGIC VIII raw.c declares those names locally.
 CFLAGS_PLATFORM = -mthumb -mlong-calls \
     -DSHAD_GAIN_REGISTER=0u \
-    -DPACK32_MODE=0u \
-    -DMODE_10BIT=0u -DMODE_12BIT=0u -DMODE_14BIT=0u -DMODE_16BIT=0u
+    -include raw_compat.h
 PLATFORM_ARCH = armv7-a
 
 ML_BOOT_OBJ = boot-d678.o
