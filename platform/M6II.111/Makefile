@@ -21,6 +21,7 @@ ML_BOOT_OBJ = boot-d678.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/function_overrides.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/test_features.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_state_probe.o
+ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_dump_probe.o
 
 include ../Makefile
 .DEFAULT_GOAL := $(BUILD_DIR)/cam_complete
