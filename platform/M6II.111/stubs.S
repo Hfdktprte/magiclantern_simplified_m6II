@@ -9,9 +9,9 @@
  * Copyright (C) 2025 Magic Lantern Team
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * modify it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  */
 
 // A big chunk of this file was auto-generated from Ghidra project
@@ -157,12 +157,13 @@ THUMB_FN(0xe0670eb6, PwrMng_WakeSubChips)
 THUMB_FN(0xe0670ee4, PwrMng_SuspendSubChips)
 THUMB_FN(0xe05b978a, CreateResLockEntry)
 THUMB_FN(0xe05b9972, LockEngineResources)
-/* function_overrides.c still exports a legacy dummy with the generic name. */
-THUMB_FN(0xe05b9a0c, M6II_UnLockEngineResources)
+THUMB_FN(0xe05b9a0c, UnLockEngineResources)
 
 /** DIGIC 8 EDMAC API (M6II ROM-mapped) **/
 THUMB_FN(0xe05bff40, ConnectReadEDmac_maybe)
 THUMB_FN(0xe05bff78, edmac_reset_channel)
+THUMB_FN(0xe05c0062, RegisterEDmacCompleteCBR)
+THUMB_FN(0xe05c03fa, UnregisterEDmacCompleteCBR)
 THUMB_FN(0xe05c048a, edmac_reset_boomer_vdkick)
 THUMB_FN(0xe05c0502, edmac_select_boomer)
 THUMB_FN(0xe05c0596, edmac_stop_boomer_maybe)
