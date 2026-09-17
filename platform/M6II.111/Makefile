@@ -24,6 +24,7 @@ ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_state_probe.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_dump_probe.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_burst_rec.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_ram_mlv_rec.o
+ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_cached_mlv_rec.o
 
 include ../Makefile
 .DEFAULT_GOAL := $(BUILD_DIR)/cam_complete
