@@ -14,7 +14,15 @@ MAIN_FIRMWARE_ADDR = 0xE0040000
 RESTARTSTART = 0xb8d20 # 0xb0078 in ROM
 
 # Cortex A9, binaries loaded as Thumb
-CFLAGS_PLATFORM = -mthumb -mlong-calls
+# Bilal-style D8 RAW video uses RAW_LV_EDMAC_CHANNEL_ADDR directly from raw.c.
+# M6II ROM: RAW destination channel 0x4B -> MMIO block 0xD04C0300.
+# Keep bpp fixed at native 14-bit for first mlv_lite bring-up; do not touch an
+# unverified D8 PACK32 register. shamem_read() currently returns 0, so the
+# generic request path becomes a no-op when mlv_lite requests 14-bit.
+CFLAGS_PLATFORM = -mthumb -mlong-calls \
+    -DRAW_LV_EDMAC_CHANNEL_ADDR=0xD04C0300u \
+    -DPACK32_MODE=0u \
+    -DMODE_10BIT=0u -DMODE_12BIT=0u -DMODE_14BIT=0u -DMODE_16BIT=0u
 PLATFORM_ARCH = armv7-a
 
 ML_BOOT_OBJ = boot-d678.o
