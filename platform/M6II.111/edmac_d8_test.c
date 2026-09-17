@@ -30,14 +30,6 @@
 #define M6II_FILL                    0xA5u
 #define M6II_LOG                     "M6II_RAW_REDIRECT.TXT"
 
-/*
- * Canon code at E0646074 (Thumb):
- *   01 68          ldr r1,[r0]          ; submitted frame address
- *   28 6d          ldr r0,[r5,#0x50]    ; RAW dst channel = 0x4B
- *   3a f7 73 fc    bl  E0580962         ; edmac_set_address(channel,address)
- *
- * Patch exactly these 8 bytes, then continue at E064607C.
- */
 #define M6II_RAW_ADDR_PATCH          0xE0646074u
 #define M6II_RAW_ADDR_CONTINUE       0xE064607Du
 #define M6II_EDMAC_SET_ADDRESS       0xE0580963u
@@ -62,14 +54,6 @@ static uint32_t m6ii_state32(uint32_t off)
     return *(volatile uint32_t *)(M6II_RAW_STATE_BASE + off);
 }
 
-/*
- * Called from the Canon RAW submission hook.
- * phase 0: passthrough
- * phase 1: redirect exactly this submitted frame to ML RAM
- * phase 2: next Canon submission is the frame-boundary completion marker;
- *          pass Canon's address unchanged and mark restore complete
- * phase 3: passthrough until the task removes the ROM hook
- */
 static __attribute__((noinline)) uint32_t m6ii_raw_choose_addr(uint32_t canon_addr)
 {
     uint32_t phase = m6ii_redirect_phase;
@@ -93,13 +77,6 @@ static __attribute__((noinline)) uint32_t m6ii_raw_choose_addr(uint32_t canon_ad
     return canon_addr;
 }
 
-/*
- * Replacement for the 8 bytes at E0646074.
- * At entry Canon already executed:
- *   push {r4,r5,r6,lr}; mov r4,r0; ldr r5,=0x0002909C
- * Therefore r4 is the frame-request pointer and r5 is RAW engine state.
- * Emulate the overwritten instructions, changing only r1 for one frame.
- */
 static void __attribute__((naked,noinline)) m6ii_raw_addr_hook(void)
 {
     __asm__ volatile(
@@ -210,7 +187,6 @@ static void m6ii_raw_redirect_test(void)
     m6ii_redirect_dst = (uint32_t)dst;
     stage = 1;
 
-    /* Install while redirect phase is zero: Canon sees no changed address yet. */
     m6ii_redirect_phase = 0;
     m6ii_redirect_hits = 0;
     m6ii_first_canon_addr = 0;
@@ -228,8 +204,6 @@ static void m6ii_raw_redirect_test(void)
     ret_on = call("lv_save_raw", 1);
     raw_enabled = 1;
 
-    /* Wait only for Canon's normal RAW path to become valid; this does not
-     * decide frame completion or restoration. */
     for (wait_ms = 0; wait_ms < 1000; wait_ms++)
     {
         width = m6ii_state32(0x10);
@@ -252,8 +226,6 @@ static void m6ii_raw_redirect_test(void)
     }
     stage = 3;
 
-    /* Arm exactly one destination substitution. The hook itself sees Canon's
-     * next submission boundary and the following one restores Canon. */
     m6ii_redirect_phase = 1;
 
     for (wait_ms = 0; wait_ms < 1500; wait_ms++)
@@ -270,7 +242,6 @@ static void m6ii_raw_redirect_test(void)
     }
     stage = 4;
 
-    /* Canon has already submitted the following frame to its own address. */
     unpatch_ret = unpatch_memory(M6II_RAW_ADDR_PATCH);
     hook_installed = 0;
     if (unpatch_ret)
@@ -296,7 +267,6 @@ static void m6ii_raw_redirect_test(void)
     stage = 7;
 
 cleanup:
-    /* Always stop redirecting before touching the patch/RAW state. */
     m6ii_redirect_phase = 0;
 
     if (hook_installed)
@@ -345,7 +315,6 @@ cleanup:
         FIO_CloseFile(f);
     }
 
-    /* Keep the first redirected buffer allocated until reboot. */
     m6ii_redirect_busy = 0;
 
     if (stage == 7 && changed != 0 && guard_bad == 0)
@@ -363,7 +332,7 @@ static struct menu_entry m6ii_redirect_menu[] = {
     },
 };
 
-static void m6ii_redirect_init(void)
+static void m6ii_redirect_init()
 {
     menu_add("Debug", m6ii_redirect_menu, COUNT(m6ii_redirect_menu));
     DryosDebugMsg(0, 15, "M6II native RAW writer redirect v8 registered");
