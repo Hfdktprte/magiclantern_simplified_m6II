@@ -111,6 +111,13 @@ THUMB_FN(0xe05994ce, give_semaphore)
 THUMB_FN(0xe0599454, take_semaphore)
 THUMB_FN(0xe0599424, take_semaphore_now)
 
+/** Event flags required by Bilal's DIGIC 8 mem2mem path **/
+THUMB_FN(0xe0598de6, CreateEventFlag_strictly)
+THUMB_FN(0xe0576f3a, DeleteEventFlag)
+THUMB_FN(0xe0577058, WaitForAnyEventFlag)
+THUMB_FN(0xe0577254, SetEventFlag)
+THUMB_FN(0xe0577282, ClearEventFlag)
+
 /** GUI **/
 DATA_PTR(0x11960, gui_task_list)
 THUMB_FN(0xe0557032, SetGUIRequestMode)
