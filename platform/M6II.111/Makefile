@@ -15,11 +15,11 @@ RESTARTSTART = 0xb8d20 # 0xb0078 in ROM
 
 # Cortex A9, binaries loaded as Thumb
 # Keep Bilal's RAW core names untouched; camera metadata needed by raw.c is
-# supplied from raw_compat.h. Do not predefine PACK32_MODE/MODE_* here because
-# Bilal's DIGIC VIII raw.c declares those names locally.
+# supplied from raw_compat.h only when compiling raw.o. Do not predefine
+# PACK32_MODE/MODE_* here because Bilal's DIGIC VIII raw.c declares those
+# names locally.
 CFLAGS_PLATFORM = -mthumb -mlong-calls \
-    -DSHAD_GAIN_REGISTER=0u \
-    -include raw_compat.h
+    -DSHAD_GAIN_REGISTER=0u
 PLATFORM_ARCH = armv7-a
 
 ML_BOOT_OBJ = boot-d678.o
@@ -34,4 +34,10 @@ ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_ram_mlv_rec.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/edmac_d8_test.o
 
 include ../Makefile
+
+# Bilal's raw.c needs the M6II color matrix and dynamic-range compatibility
+# table. Restrict this include to raw.o so C declarations are never injected
+# while preprocessing magiclantern.lds or unrelated translation units.
+$(BUILD_DIR)/raw.o: CFLAGS += -include raw_compat.h
+
 .DEFAULT_GOAL := $(BUILD_DIR)/cam_complete
