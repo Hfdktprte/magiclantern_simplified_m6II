@@ -73,7 +73,7 @@ extern uint32_t DeleteEventFlag(uint32_t event_id);
 
 
 /*
- * Same Bilal M50 architecture, with only the proven M6II 1.1.1
+ * Bilal M50 architecture, with only the proven M6II 1.1.1
  * MemoryToMemoryEsub5 bindings substituted.
  */
 const uint32_t mem2mem_devices[2] = {4, 7};
@@ -88,8 +88,10 @@ struct LockEntry * mem2mem_lock;
 uint32_t mem2mem_event;
 uint32_t mem2mem_status;
 
-static void mem2mem_CBR(uint32_t arg)
+/* Keep Bilal's callback logic; adapt only to the core edmac.h callback ABI. */
+static void mem2mem_CBR(void *ctx)
 {
+  uint32_t arg = (uint32_t)ctx;
   uint32_t old_irq = cli();
   mem2mem_status = mem2mem_status | arg;
   sei(old_irq);
@@ -111,8 +113,8 @@ uint32_t mem2mem_emdac_copy_d8(void * src, void * dst, struct edmac_info * src_i
 
     mem2mem_event = CreateEventFlag_strictly("Mem2MemD8Copy");
     mem2mem_status = 0;
-    RegisterEDmacCompleteCBR(MEM2MEM_RD_CH, mem2mem_CBR, 1);
-    RegisterEDmacCompleteCBR(MEM2MEM_WR_CH, mem2mem_CBR, 2);
+    RegisterEDmacCompleteCBR(MEM2MEM_RD_CH, mem2mem_CBR, (void *)1);
+    RegisterEDmacCompleteCBR(MEM2MEM_WR_CH, mem2mem_CBR, (void *)2);
 
     edmac_reset_packunpack_mode(MEM2MEM_RD_CH);
     edmac_reset_packunpack_mode(MEM2MEM_WR_CH);
