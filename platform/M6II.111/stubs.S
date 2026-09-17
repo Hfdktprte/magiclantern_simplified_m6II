@@ -159,19 +159,23 @@ THUMB_FN(0xe05b978a, CreateResLockEntry)
 THUMB_FN(0xe05b9972, LockEngineResources)
 THUMB_FN(0xe05b9a0c, UnLockEngineResources)
 
-/** DIGIC 8 EDMAC API (M6II ROM-mapped) **/
-THUMB_FN(0xe05bff40, ConnectReadEDmac_maybe)
-THUMB_FN(0xe05bff78, edmac_reset_channel)
-THUMB_FN(0xe05c0062, RegisterEDmacCompleteCBR)
-THUMB_FN(0xe05c03fa, UnregisterEDmacCompleteCBR)
-THUMB_FN(0xe05c048a, edmac_reset_boomer_vdkick)
-THUMB_FN(0xe05c0502, edmac_select_boomer)
-THUMB_FN(0xe05c0596, edmac_stop_boomer_maybe)
-THUMB_FN(0xe05c05da, edmac_reset_packunpack_mode)
-THUMB_FN(0xe05c0782, StartEDmac_maybe)
-THUMB_FN(0xe05c0962, edmac_set_address)
-THUMB_FN(0xe05c096e, edmac_set_size)
-THUMB_FN(0xe05c0e5a, edmac_set_transfer_mode)
+/** DIGIC 8 EDMAC API (M6II ROM-mapped)
+ * ROM0.BIN is based at 0xE0000000.  Do not add the old +0x40000 shift here.
+ * The 0x4B RAW writer specifically calls edmac_set_address at 0xE0580962
+ * and edmac_set_size at 0xE058096E.
+ */
+THUMB_FN(0xe057ff40, ConnectReadEDmac_maybe)
+THUMB_FN(0xe057ff78, edmac_reset_channel)
+THUMB_FN(0xe0580062, RegisterEDmacCompleteCBR)
+THUMB_FN(0xe05803fa, UnregisterEDmacCompleteCBR)
+THUMB_FN(0xe058048a, edmac_reset_boomer_vdkick)
+THUMB_FN(0xe0580502, edmac_select_boomer)
+THUMB_FN(0xe0580596, edmac_stop_boomer_maybe)
+THUMB_FN(0xe05805da, edmac_reset_packunpack_mode)
+THUMB_FN(0xe0580782, StartEDmac_maybe)
+THUMB_FN(0xe0580962, edmac_set_address)
+THUMB_FN(0xe058096e, edmac_set_size)
+THUMB_FN(0xe0580e5a, edmac_set_transfer_mode)
 
 /** Uncategorized **/
 DATA_PTR(0x14684, sd_device)
