@@ -28,10 +28,11 @@
  * disassemble the actual M6 II LiveView implementation offline before ever
  * touching a guessed DIGIC 8 EDMAC register.
  */
-#define M6II_LV_SET_MM_DUMP_BASE   0x02280000
-#define M6II_LV_SAVE_RAW_DUMP_BASE 0x022c0000
-#define M6II_LV_CODE_DUMP_SIZE     0x00010000
-#define M6II_LV_CODE_CHUNK_SIZE    0x00001000
+#define M6II_LV_SET_MM_DUMP_BASE    0x02280000
+#define M6II_LV_PIPELINE_DUMP_BASE  0x022a0000
+#define M6II_LV_SAVE_RAW_DUMP_BASE  0x022c0000
+#define M6II_LV_CODE_DUMP_SIZE      0x00010000
+#define M6II_LV_CODE_CHUNK_SIZE     0x00001000
 
 static volatile int m6ii_raw_probe_busy = 0;
 static volatile int m6ii_raw_probe_requested = 0;
@@ -232,6 +233,28 @@ static void m6ii_dump_lv_code_ram()
         NotifyBox(5000, "RAM code dump FAILED: set_mm=%d save_raw=%d", ok_mm, ok_raw);
 }
 
+static void m6ii_dump_lv_pipeline_ram()
+{
+    if (!m6ii_raw_preflight())
+        return;
+
+    m6ii_raw_probe_busy = 1;
+    DryosDebugMsg(0, 15, "M6II RAW stage2c: dumping LV pipeline RAM code");
+
+    int ok = m6ii_dump_ram_window(
+        "M6II_LV_PIPELINE_RAM.BIN",
+        M6II_LV_PIPELINE_DUMP_BASE,
+        M6II_LV_CODE_DUMP_SIZE);
+
+    DryosDebugMsg(0, 15, "M6II RAW stage2c: pipeline=%d", ok);
+    m6ii_raw_probe_busy = 0;
+
+    if (ok)
+        NotifyBox(5000, "Pipeline RAM dump complete: upload M6II_LV_PIPELINE_RAM.BIN");
+    else
+        NotifyBox(5000, "Pipeline RAM dump FAILED");
+}
+
 static MENU_UPDATE_FUNC(m6ii_raw_probe_status)
 {
     MENU_SET_VALUE("%s%s",
@@ -263,6 +286,12 @@ static struct menu_entry m6ii_raw_probe_menu[] = {
                 .priv   = m6ii_dump_lv_code_ram,
                 .select = run_in_separate_task,
                 .help   = "Stage 2b: dump small RAM code windows around ROM-verified lv_set_mm/lv_save_raw pointers."
+            },
+            {
+                .name   = "Dump LV pipeline RAM code",
+                .priv   = m6ii_dump_lv_pipeline_ram,
+                .select = run_in_separate_task,
+                .help   = "Stage 2c: dump 0x022a0000 code containing RAW-state consumers and lower-level pipeline calls."
             },
             {
                 .name   = "Force RAW off",
