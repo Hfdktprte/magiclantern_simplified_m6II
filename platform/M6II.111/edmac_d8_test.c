@@ -62,11 +62,6 @@ static void m6ii_edmac_test_run()
         NotifyBox(2000, "EDMAC test already running");
         return;
     }
-    if (RECORDING)
-    {
-        NotifyBox(3000, "Stop Canon recording first");
-        return;
-    }
 
     m6ii_edmac_busy = 1;
     volatile uint32_t *src = 0;
@@ -96,8 +91,7 @@ static void m6ii_edmac_test_run()
         src[i] = 0x6d360000u ^ (i * 0x10204081u);
         dst[i] = 0;
     }
-    /* Make the last word a guaranteed non-zero completion sentinel. */
-    src[words - 1] = 0x4d36444d; /* 'M6DM' */
+    src[words - 1] = 0x4d36444d;
     dst[words - 1] = 0;
     checksum_src = m6ii_checksum32(src, M6II_EDMAC_TEST_SIZE);
     stage = 1;
@@ -111,7 +105,6 @@ static void m6ii_edmac_test_run()
     lock_ret = LockEngineResources(lock);
     stage = 2;
 
-    /* D8 EDMAC MMIO is unsafe while its power domain sleeps. */
     PwrMng_WakeSubChips(m6ii_edmac_devices);
     stage = 3;
 
@@ -141,7 +134,6 @@ static void m6ii_edmac_test_run()
     StartEDmac_maybe(M6II_EDMAC_RD_CH);
     ConnectReadEDmac_maybe(M6II_EDMAC_RD_CH);
 
-    /* Poll only a DMA-memory sentinel; no peripheral reads are performed here. */
     for (int i = 0; i < 100; i++)
     {
         if (dst[words - 1] == src[words - 1])
@@ -173,7 +165,6 @@ static void m6ii_edmac_test_run()
     stage = 7;
 
 cleanup:
-    /* If setup failed after the lock but before normal cleanup, unwind safely. */
     if (lock)
     {
         if (stage >= 3)
