@@ -91,8 +91,6 @@ void ConnectWriteEDmac(unsigned int channel, unsigned int where) { return; }
 void ConnectReadEDmac(unsigned int channel, unsigned int where) { return; }
 void StartEDmac(unsigned int channel, int flags) { return; }
 void AbortEDmac(unsigned int channel) { return; }
-void RegisterEDmacCompleteCBR(int channel, void (*cbr)(void*), void* cbr_ctx) { return; }
-void UnregisterEDmacCompleteCBR(int channel) { return; }
 void RegisterEDmacAbortCBR(int channel, void (*cbr)(void*), void* cbr_ctx) { return; }
 void UnregisterEDmacAbortCBR(int channel) { return; }
 void RegisterEDmacPopCBR(int channel, void (*cbr)(void*), void* cbr_ctx) { return; }
@@ -101,7 +99,7 @@ void _EngDrvOut(uint32_t reg, uint32_t value) { return; }
 
 /* Bilal DIGIC 8 behavior: no shamem layer on D8; validated 0xDxxxxxxx
  * addresses are read directly. RAW_LV_EDMAC_CHANNEL_ADDR is supplied by
- * consts.h and is M6II Canon logical EDMAC channel 3. */
+ * consts.h for the M6II RAW writer. */
 uint32_t shamem_read(uint32_t addr)
 {
     if ((addr >> 28) != 0xD)
@@ -133,8 +131,3 @@ void ErrCardForLVApp_handler(void)
 }
 
 void _engio_write(uint32_t* reg_list) { return; }
-
-unsigned int UnLockEngineResources(struct LockEntry *lockEntry)
-{
-    return 0;
-}
