@@ -1,10 +1,10 @@
 /** \file
- * EOS M6 Mark II ROM-derived FrameToLinear RAW tap test.
+ * EOS M6 Mark II ROM-derived FrameToLinear RAW tap scaling test.
  *
- * v4 proved that feeding the CPU-visible RAW pointer directly to generic
- * MemoryToMemoryEsub5 can hard-lock. Canon's own image path instead maps a
- * 64-KiB-aligned frame-memory base through MemifWrap and uses CopyEsub6,
- * channels 0x40 -> 0x1A. This test reproduces that path for ONE line only.
+ * v5 proved Canon's MemifWrap + CopyEsub6 frame-memory path can copy one
+ * 3568-pixel line from the LiveView RAW frame region into linear DMA RAM.
+ * v6 keeps the exact same ROM-derived path and requests 128 lines in one
+ * transfer to measure scaling without changing channels/resources.
  */
 
 #ifndef CONFIG_HELLO_WORLD
@@ -18,9 +18,10 @@
 #define M6II_RAW_STATE_BASE       0x00010970u
 #define M6II_RAW_WIDTH_EXPECTED   3568u
 #define M6II_RAW_HEIGHT_EXPECTED  2000u
+#define M6II_TAP_LINES            128u
 #define M6II_TAP_DST_BYTES        (1024u * 1024u)
 #define M6II_TAP_FILL             0xA5u
-#define M6II_TAP_LOG              "M6II_FRAME_TAP.TXT"
+#define M6II_TAP_LOG              "M6II_FRAME_TAP128.TXT"
 
 /* Canon FrameToLinear fixed configuration from ROM table 0xE0CF49C0. */
 #define M6II_FRAME_RD_CH          0x40u
@@ -52,7 +53,6 @@ typedef unsigned int (*m6ii_lock_fn)(struct LockEntry *lock);
 #define M6II_DELETE_LOCK       ((m6ii_lock_fn)(0xE057986Eu | 1u))
 
 extern void *_alloc_dma_memory(size_t size);
-extern void _free_dma_memory(void *ptr);
 
 static volatile int m6ii_frame_tap_busy = 0;
 
@@ -87,12 +87,12 @@ static void m6ii_frame_tap_run()
 {
     if (m6ii_frame_tap_busy)
     {
-        NotifyBox(2000, "Frame tap already running");
+        NotifyBox(2000, "128-line tap already running");
         return;
     }
     if (!LV_NON_PAUSED)
     {
-        NotifyBox(3000, "Frame tap requires active LiveView");
+        NotifyBox(3000, "128-line tap requires active LiveView");
         return;
     }
     if (RECORDING)
@@ -119,9 +119,10 @@ static void m6ii_frame_tap_run()
     uint32_t bandwidth = 0;
     uint32_t offset_units = 0, src_x = 0, src_y = 0;
     uint32_t memif_handle = 0;
+    uint32_t line_bytes = 0, requested_bytes = 0;
     uint32_t elapsed_us = 0xffffffffu;
-    uint32_t changed_first_64k = 0;
-    uint32_t checksum_first_64k = 0;
+    uint32_t changed_requested = 0;
+    uint32_t checksum_requested = 0;
     uint32_t first_words[16];
     memset(first_words, 0, sizeof(first_words));
 
@@ -148,17 +149,13 @@ static void m6ii_frame_tap_run()
         goto cleanup;
     }
 
-    /*
-     * Canon FrameToLinear does not pass this CPU pointer to EDMAC.
-     * It registers a 64-KiB-aligned frame-memory base with MemifWrap.
-     * CopyEsub6 then addresses within that mapped frame using X/Y units.
-     */
     map_base = raw_ptr & 0xffff0000u;
     map_offset = raw_ptr - map_base;
-    bandwidth = m6ii_round_up_512(width);   /* Canon rounds BW to 512. */
+    bandwidth = m6ii_round_up_512(width);
+    line_bytes = bandwidth * 2u;
+    requested_bytes = line_bytes * M6II_TAP_LINES;
 
-    /* Canon FrameToLinear type 1 uses 16 bits/unit on the frame side. */
-    if ((map_offset & 1u) || !bandwidth)
+    if ((map_offset & 1u) || !bandwidth || requested_bytes > M6II_TAP_DST_BYTES)
     {
         stage = -3;
         goto cleanup;
@@ -167,7 +164,6 @@ static void m6ii_frame_tap_run()
     src_y = offset_units / bandwidth;
     src_x = offset_units % bandwidth;
 
-    /* MemifWrap(index=0, 64-KiB aligned base, 2*BW bytes). */
     memif_handle = M6II_MEMIF_WRAP(0, map_base, bandwidth * 2u);
     if (!memif_handle)
     {
@@ -192,32 +188,24 @@ static void m6ii_frame_tap_run()
     copye6_ready = 1;
     stage = 4;
 
-    /*
-     * Exact 13-word descriptor shape produced by Canon FrameToLinear():
-     * source type/base/BW/X/Y, destination type/base/BW/X/Y,
-     * copy width/lines, Memif handle.
-     *
-     * We request ONE line only. At type 1, one full 3584-unit line is
-     * roughly 7 KiB, while the destination allocation is 1 MiB.
-     */
     uint32_t d[13];
     memset(d, 0, sizeof(d));
-    d[0]  = 1u;                       /* source format */
-    d[1]  = map_base;                 /* used by Memif mapping; CopyEsub6 zeroes direct src base */
+    d[0]  = 1u;
+    d[1]  = map_base;
     d[2]  = bandwidth;
     d[3]  = src_x;
     d[4]  = src_y;
-    d[5]  = 1u;                       /* destination format */
+    d[5]  = 1u;
     d[6]  = (uint32_t)dst;
     d[7]  = bandwidth;
     d[8]  = 0u;
     d[9]  = 0u;
     d[10] = bandwidth;
-    d[11] = 1u;                       /* one line */
+    d[11] = M6II_TAP_LINES;
     d[12] = memif_handle;
 
     uint32_t t0 = (uint32_t)get_us_clock();
-    M6II_COPYE6_TRANSFER(d);           /* Canon wrapper includes completion wait/timeout. */
+    M6II_COPYE6_TRANSFER(d);
     elapsed_us = (uint32_t)get_us_clock() - t0;
     stage = 5;
 
@@ -233,8 +221,8 @@ static void m6ii_frame_tap_run()
     raw_enabled = 0;
     stage = 6;
 
-    changed_first_64k = m6ii_changed_bytes(dst, 65536u);
-    checksum_first_64k = m6ii_checksum32((const volatile uint32_t *)dst, 65536u);
+    changed_requested = m6ii_changed_bytes(dst, requested_bytes);
+    checksum_requested = m6ii_checksum32((const volatile uint32_t *)dst, requested_bytes);
     for (int i = 0; i < 16; i++)
         first_words[i] = ((volatile uint32_t *)dst)[i];
     stage = 7;
@@ -258,18 +246,20 @@ cleanup:
     FILE *f = FIO_CreateFile(M6II_TAP_LOG);
     if (f)
     {
-        char text[1800];
+        char text[2048];
         int len = snprintf(text, sizeof(text),
-            "M6II FrameToLinear RAW tap v5\n"
+            "M6II FrameToLinear RAW tap v6 128 lines\n"
             "width=0x%08x\nheight=0x%08x\nraw_ptr=0x%08x\n"
             "map_base=0x%08x\nmap_offset=0x%08x\nbandwidth=0x%08x\n"
             "src_x=0x%08x\nsrc_y=0x%08x\nmemif_handle=0x%08x\n"
             "frame_rd_ch=0x%08x\nlinear_wr_ch=0x%08x\n"
             "resource0=0x%08x\nresource1=0x%08x\npower_subchip=0x00000005\n"
+            "lines=0x%08x\nline_bytes=0x%08x\nrequested_bytes=0x%08x\n"
             "dst=0x%08x\nstage=0x%08x\n"
             "ret_mm=0x%08x\nret_raw_on=0x%08x\nret_raw_off=0x%08x\n"
             "lock_ret=0x%08x\nunlock_ret=0x%08x\ndelete_ret=0x%08x\n"
-            "elapsed_us=0x%08x\nchanged_first_64k=0x%08x\nchecksum_first_64k=0x%08x\n"
+            "elapsed_us=0x%08x\nchanged_requested=0x%08x\nchecksum_requested=0x%08x\n"
+            "dst_kept_until_reboot=0x00000001\n"
             "w00=0x%08x w01=0x%08x w02=0x%08x w03=0x%08x\n"
             "w04=0x%08x w05=0x%08x w06=0x%08x w07=0x%08x\n"
             "w08=0x%08x w09=0x%08x w10=0x%08x w11=0x%08x\n"
@@ -279,10 +269,11 @@ cleanup:
             src_x, src_y, memif_handle,
             M6II_FRAME_RD_CH, M6II_LINEAR_WR_CH,
             m6ii_frame_resources[0], m6ii_frame_resources[1],
+            M6II_TAP_LINES, line_bytes, requested_bytes,
             (uint32_t)dst, (uint32_t)stage,
             (uint32_t)ret_mm, (uint32_t)ret_on, (uint32_t)ret_off,
             lock_ret, unlock_ret, delete_ret,
-            elapsed_us, changed_first_64k, checksum_first_64k,
+            elapsed_us, changed_requested, checksum_requested,
             first_words[0], first_words[1], first_words[2], first_words[3],
             first_words[4], first_words[5], first_words[6], first_words[7],
             first_words[8], first_words[9], first_words[10], first_words[11],
@@ -291,30 +282,30 @@ cleanup:
         FIO_CloseFile(f);
     }
 
-    if (dst)
-        _free_dma_memory((void *)dst);
-
-    if (stage == 7 && changed_first_64k != 0)
-        NotifyBox(8000, "FRAME TAP CHANGED RAM: 0x%08x bytes", changed_first_64k);
-    else
-        NotifyBox(8000, "FRAME TAP result stage=0x%08x changed=0x%08x", (uint32_t)stage, changed_first_64k);
-
+    /* v5 reached the log but some cameras did not return to the menu cleanly.
+     * Keep the 1 MiB test buffer allocated until reboot; this removes the
+     * post-log DMA free as a variable and makes task completion explicit. */
     m6ii_frame_tap_busy = 0;
+
+    if (stage == 7 && changed_requested != 0)
+        NotifyBox(4000, "128-LINE TAP DONE: 0x%08x us", elapsed_us);
+    else
+        NotifyBox(4000, "128-LINE TAP result stage=0x%08x", (uint32_t)stage);
 }
 
 static struct menu_entry m6ii_frame_tap_menu[] = {
     {
-        .name   = "TEST RAW frame tap v5",
+        .name   = "TEST RAW 128-line tap v6",
         .priv   = m6ii_frame_tap_run,
         .select = run_in_separate_task,
-        .help   = "One-line Canon FrameToLinear/CopyEsub6 tap using M6II ROM-derived channels/resources."
+        .help   = "128-line Canon FrameToLinear/CopyEsub6 scaling test using the v5-proven path."
     },
 };
 
 static void m6ii_frame_tap_init()
 {
     menu_add("Debug", m6ii_frame_tap_menu, COUNT(m6ii_frame_tap_menu));
-    DryosDebugMsg(0, 15, "M6II FrameToLinear RAW tap v5: menu registered");
+    DryosDebugMsg(0, 15, "M6II FrameToLinear RAW tap v6: 128-line menu registered");
 }
 
 INIT_FUNC(__FILE__, m6ii_frame_tap_init);
