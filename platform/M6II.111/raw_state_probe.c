@@ -29,7 +29,6 @@
  *
  * 7/4 bytes per pixel is 14-bit packed RAW.
  */
-static volatile uint32_t * const m6ii_raw_state = (volatile uint32_t *)M6II_RAW_STATE_BASE;
 
 static volatile int m6ii_raw_state_busy = 0;
 
