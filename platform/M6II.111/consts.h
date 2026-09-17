@@ -160,7 +160,17 @@ EC811[1]>VramState
 #define YUV422_LV_PITCH               736 // Is it 736 or 720? No scalling on XCM but UI is 720, OutputChunk 736
 #define YUV422_HD_BUFFER_DMA_ADDR     0x0 // TODO: Fix it, null pointer!. It expects this to be shamem_read(some_DMA_ADDR)
 
-/* M6II 1.1.1 Canon ShtRawAutoPath RAW destination EDMAC channel 0x4B. */
+/* M6II 1.1.1 Canon RAW destination EDMAC writer.
+ * Proven from ROM0.BIN (base 0xE0000000):
+ *   RAW state +0x50 = logical channel 0x4B
+ *   channel table   = 0xE1008944
+ *   table[0x4B]     = 0xD04C0300
+ *   edmac_set_size  = 0xE058096E -> +0x48/+0x4C/+0x50/+0x54
+ *   edmac_set_addr  = 0xE0580962 -> +0xA0
+ *
+ * Runtime reads of these configuration registers return zero on M6II even
+ * while Canon RAW state is live; do not "fix" this by changing the block.
+ */
 #define RAW_LV_EDMAC_CHANNEL_ADDR 0xD04C0300
 
 // At time of writing R uses here "DispOperator_PropertyMasterSetDisplayTurnOffOn (%d)"
