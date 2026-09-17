@@ -18,6 +18,21 @@
 #define M6II_RAW_PULSE_MS 500
 #define M6II_RAW_STAGE2_LOG "M6II_RAW_STAGE2.LOG"
 
+/*
+ * ROM0's Canon eventproc tables for this exact M6II.111 / 5.9.2 firmware map:
+ *   lv_set_mm   -> 0x022853f3 (Thumb; code at 0x022853f2)
+ *   lv_save_raw -> 0x022c23bd (Thumb; code at 0x022c23bc)
+ *
+ * These are ordinary runtime RAM/code addresses, not EDMAC/MMIO addresses.
+ * Dump only small 64 KiB windows around the registered functions so we can
+ * disassemble the actual M6 II LiveView implementation offline before ever
+ * touching a guessed DIGIC 8 EDMAC register.
+ */
+#define M6II_LV_SET_MM_DUMP_BASE   0x02280000
+#define M6II_LV_SAVE_RAW_DUMP_BASE 0x022c0000
+#define M6II_LV_CODE_DUMP_SIZE     0x00010000
+#define M6II_LV_CODE_CHUNK_SIZE    0x00001000
+
 static volatile int m6ii_raw_probe_busy = 0;
 static volatile int m6ii_raw_probe_requested = 0;
 
@@ -157,6 +172,66 @@ static void m6ii_raw_stage2_log()
     NotifyBox(4000, "Stage2 done: copy M6II_RAW_STAGE2.LOG + newest log*.log");
 }
 
+static int m6ii_dump_ram_window(const char *filename, uint32_t address, uint32_t size)
+{
+    FILE *f = FIO_CreateFile(filename);
+    if (!f)
+        return 0;
+
+    void *buf = malloc(M6II_LV_CODE_CHUNK_SIZE);
+    if (!buf)
+    {
+        FIO_CloseFile(f);
+        return 0;
+    }
+
+    uint32_t written = 0;
+    while (written < size)
+    {
+        uint32_t chunk = MIN(M6II_LV_CODE_CHUNK_SIZE, size - written);
+        memcpy(buf, (void *)(address + written), chunk);
+        int ret = FIO_WriteFile(f, buf, chunk);
+        if (ret != (int)chunk)
+        {
+            free(buf);
+            FIO_CloseFile(f);
+            return 0;
+        }
+        written += chunk;
+    }
+
+    free(buf);
+    FIO_CloseFile(f);
+    return 1;
+}
+
+static void m6ii_dump_lv_code_ram()
+{
+    if (!m6ii_raw_preflight())
+        return;
+
+    m6ii_raw_probe_busy = 1;
+    DryosDebugMsg(0, 15, "M6II RAW stage2b: dumping LV eventproc RAM code");
+
+    int ok_mm = m6ii_dump_ram_window(
+        "M6II_LV_SET_MM_RAM.BIN",
+        M6II_LV_SET_MM_DUMP_BASE,
+        M6II_LV_CODE_DUMP_SIZE);
+
+    int ok_raw = m6ii_dump_ram_window(
+        "M6II_LV_SAVE_RAW_RAM.BIN",
+        M6II_LV_SAVE_RAW_DUMP_BASE,
+        M6II_LV_CODE_DUMP_SIZE);
+
+    DryosDebugMsg(0, 15, "M6II RAW stage2b: set_mm=%d save_raw=%d", ok_mm, ok_raw);
+    m6ii_raw_probe_busy = 0;
+
+    if (ok_mm && ok_raw)
+        NotifyBox(5000, "RAM code dump complete: upload both M6II_LV_*_RAM.BIN files");
+    else
+        NotifyBox(5000, "RAM code dump FAILED: set_mm=%d save_raw=%d", ok_mm, ok_raw);
+}
+
 static MENU_UPDATE_FUNC(m6ii_raw_probe_status)
 {
     MENU_SET_VALUE("%s%s",
@@ -181,7 +256,13 @@ static struct menu_entry m6ii_raw_probe_menu[] = {
                 .name   = "RAW discovery log (500 ms)",
                 .priv   = m6ii_raw_stage2_log,
                 .select = run_in_separate_task,
-                .help   = "Stage 2: same pulse, records eventproc returns and dumpf logs. No EDMAC MMIO."
+                .help   = "Stage 2a: same pulse, records eventproc returns and dumpf logs. No EDMAC MMIO."
+            },
+            {
+                .name   = "Dump LV eventproc RAM code",
+                .priv   = m6ii_dump_lv_code_ram,
+                .select = run_in_separate_task,
+                .help   = "Stage 2b: dump small RAM code windows around ROM-verified lv_set_mm/lv_save_raw pointers."
             },
             {
                 .name   = "Force RAW off",
