@@ -99,11 +99,18 @@ void RegisterEDmacPopCBR(int channel, void (*cbr)(void*), void* cbr_ctx) { retur
 void UnregisterEDmacPopCBR(int channel) { return; }
 void _EngDrvOut(uint32_t reg, uint32_t value) { return; }
 
-/* D8 has no legacy shamem API. Keep unknown generic reads inert for the first
- * native-14-bit mlv_lite bring-up; verified RAW redirection uses direct MMIO. */
+/* Match Bilal's D8 compatibility behavior: there is no legacy shamem API,
+ * so validated D-domain MMIO is read directly. Reject anything outside the
+ * 0xDxxxxxxx MMIO range instead of borrowing legacy camera addresses. */
 uint32_t shamem_read(uint32_t addr)
 {
-    return 0;
+    if ((addr >> 28) != 0xD)
+    {
+        DryosDebugMsg(0, 15, "shamem_read from %08x - aborted", addr);
+        return 0;
+    }
+
+    return *(volatile uint32_t *)addr;
 }
 
 /* Same compatibility exports used by Bilal's M50 port. SRM is intentionally
