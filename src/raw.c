@@ -33,10 +33,6 @@
 #include "fps.h"
 #include "platform/state-object.h"
 
-#ifdef CONFIG_EDMAC_RAW_PATCH
-#include "patch.h"
-#endif
-
 #undef RAW_DEBUG        /* define it to help with porting */
 #undef RAW_DEBUG_DUMP   /* if you want to save the raw image buffer and the DNG from here */
 #undef RAW_DEBUG_BLACK  /* for checking black level calibration */
@@ -2169,104 +2165,13 @@ int _raw_lv_get_iso_post_gain()
 
 #endif // CONFIG_EDMAC_RAW_SLURP
 
-#ifdef CONFIG_EDMAC_RAW_PATCH
-
-#define EDMAC_SET_SIZE_ADDR  0xE054A9BA
-#define EDMAC_RAW_CHANNEL  3
-
-void edmac_raw_adjust_pitch( uint32_t channel, struct edmac_info *edmac_config)
-{
-
-    if (channel != EDMAC_RAW_CHANNEL || !edmac_config->xb || !edmac_config->yb)
-        return;
-
-    uint32_t  raw_pitch_14bpp = edmac_config->xb;
-    uint32_t  width =  raw_pitch_14bpp * 8 / 14;
-    uint32_t  pitch = width * raw_info.bits_per_pixel / 8;
-
-    edmac_config->xb = pitch;
-
-}
-
-void __attribute__((noinline,naked,aligned(4)))
-raw_lv_setedmac_hook(void)
-{
-    asm volatile(
-        /* preserve registers */
-        "push {r0-r11, lr}\n"
-
-        /* keep AAPCS stack alignment */
-        "sub  sp, #4\n"
-
-        /* call edmac_raw_adjust_pitch(r0, r1) */
-        "mov  r3, %0\n"
-        "blx  r3\n"
-
-        /* restore registers */
-        "add  sp, #4\n"
-        "pop  {r0-r11, lr}\n"
-
-        /* overwritten instructions */
-        "push {r4,r5,r6,r7,r8,r9,r10,r11,lr}\n"
-        "mov  r5, r0\n"
-
-        /* original: ldr r0, =0xE0DD7BA0, this avoid "offset out of range" message in compiler */
-        "movw r0, #0x7BA0\n"
-        "movt r0, #0xE0DD\n"
-
-        /* original: ldr pc, =0xE054A9C3, this avoid "offset out of range" message in compiler */
-        "movw r3, #0xA9C3\n"
-        "movt r3, #0xE054\n"
-        "bx   r3\n"
-        :
-        : "r"(edmac_raw_adjust_pitch)
-        : "r3"
-    );
-}
-
-int install_edmac_raw_patch (void)
-{
-#ifdef CONFIG_M50
-    struct function_hook_patch edmac_raw_patch_defs[] = {
-    {
-        .patch_addr = EDMAC_SET_SIZE_ADDR, // edmac_set_size
-        .orig_content = {0x2d, 0xE9, 0xF0, 0x4F, 0x05, 0x46, 0x83, 0x48},
-        .target_function_addr = (uint32_t)raw_lv_setedmac_hook,
-        .description = "RAW EDMAC"
-    },
-};
-
-struct patch edmac_raw_patches[COUNT(edmac_raw_patch_defs)] = {};
-uint8_t edmac_raw_hook_code[8 * COUNT(edmac_raw_patch_defs)] = {};
-
-    for (int i = 0; i < COUNT(edmac_raw_patch_defs); i++)
-    {
-        if (convert_f_patch_to_patch(&edmac_raw_patch_defs[i],
-                                         &edmac_raw_patches[i],
-                                         &edmac_raw_hook_code[8 * i]))
-         {
-            return 1;
-         }
-    }
-
-    apply_patches(edmac_raw_patches, COUNT(edmac_raw_patch_defs));
-#endif
-}
-#endif // CONFIG_EDMAC_RAW_PATCH
-
 int raw_lv_settings_still_valid()
 {
     /* should be fast enough for vsync calls */
     if (!lv_raw_enabled) return 0;
     int w, h;
     if (!raw_lv_get_resolution(&w, &h)) return 0;
-#if defined(CONFIG_M50)
-    if (w != (raw_info.width * raw_info.bits_per_pixel) / 14
-        || h != raw_info.height)
-        return 0;
-#else
     if (w != raw_info.width || h != raw_info.height) return 0;
-#endif
     return 1;
 }
 #endif // CONFIG_RAW_LIVEVIEW
@@ -2554,9 +2459,6 @@ static void raw_lv_enable()
     //call("lv_set_raw_wp", 0);
 #endif
     call("lv_save_raw", 1);
-#ifdef CONFIG_EDMAC_RAW_PATCH
-    install_edmac_raw_patch();
-#endif
 #endif
 
 #ifdef DEFAULT_RAW_BUFFER
@@ -2599,9 +2501,6 @@ static void raw_lv_disable()
 
 #ifndef CONFIG_EDMAC_RAW_SLURP
     call("lv_save_raw", 0);
-#ifdef CONFIG_EDMAC_RAW_PATCH
-    unpatch_memory(EDMAC_SET_SIZE_ADDR);
-#endif
 #endif
 
 #ifdef CONFIG_ALLOCATE_RAW_LV_BUFFER
@@ -2731,34 +2630,29 @@ void raw_lv_request_bpp(int bpp)
 //            MODE_12BIT = 0x2000, // possibly 24 bit?
         };
     #elif defined(CONFIG_DIGIC_VIII)
-        enum {
-            MODE_16BIT = 0x2, // unknown, copying 14 bit for now
-            MODE_14BIT = 0x2, // default value, 14-bit
-            MODE_12BIT = 0x1, //                12-bit
-            MODE_10BIT = 0x0, //                10-bit
+        enum { // wrong, copy of 200d
+            MODE_16BIT = 0x20,
+            MODE_14BIT = 0x20,
+            MODE_12BIT = 0x10,
+            MODE_10BIT =  0x0,
         };
-	    const uint32_t PACK32_MODE = PackMode_Field_ADDR_For_RAW_LV_EDMAC_CHANNEL;
+	    // idk how this works on D8. Set constant, but immediately return.
+	    const uint32_t PACK32_MODE = 0xd0008094; // wrong, copy of 200d
+        give_semaphore(raw_sem);
+        return;
     #endif
     const uint32_t modes[] = { MODE_10BIT, MODE_12BIT, MODE_14BIT, MODE_16BIT};
 
     int bpp_index = COERCE((bpp-10)/2, 0, COUNT(modes));
 
-    #if defined(CONFIG_DIGIC_VIII)
-    if (PACK32_MODE == modes[bpp_index])
-    #else
     if (shamem_read(PACK32_MODE) == modes[bpp_index])
-    #endif
     {
         /* no change needed */
         ASSERT(raw_info.bits_per_pixel == bpp);
     }
     else
     {
-        #if defined(CONFIG_DIGIC_VIII)
-        MEM(PACK32_MODE) = modes[bpp_index];
-        #else
         EngDrvOut(PACK32_MODE, modes[bpp_index]);
-        #endif
         raw_info.bits_per_pixel = bpp;
         raw_info.pitch = raw_info.width * raw_info.bits_per_pixel / 8;
         raw_info.frame_size = raw_info.pitch * raw_info.height;
