@@ -99,66 +99,18 @@ void RegisterEDmacPopCBR(int channel, void (*cbr)(void*), void* cbr_ctx) { retur
 void UnregisterEDmacPopCBR(int channel) { return; }
 void _EngDrvOut(uint32_t reg, uint32_t value) { return; }
 
-/* M6II 1.1.1 Canon RAW state recovered from ROM/runtime probes. */
-#define M6II_RAW_STATE_BASE       0x00010970u
-#define M6II_RAW_WIDTH_OFF        0x10u
-#define M6II_RAW_HEIGHT_OFF       0x14u
-#define M6II_RAW_BUFFER_OFF       0x58u
-#define M6II_RAW_EDMAC_BASE       0xD04C0300u
-#define M6II_RAW_EDMAC_YB_XB      (M6II_RAW_EDMAC_BASE + 0x50u)
-#define M6II_RAW_EDMAC_YN_XN      (M6II_RAW_EDMAC_BASE + 0x54u)
-#define M6II_RAW_EDMAC_RAM_ADDR   (M6II_RAW_EDMAC_BASE + 0xA0u)
-
-static inline uint32_t m6ii_raw_state32(uint32_t off)
-{
-    return *(volatile uint32_t *)(M6II_RAW_STATE_BASE + off);
-}
-
-/* Bilal's generic RAW core expects legacy-style geometry reads from the RAW
- * writer EDMAC. On M6II channel 0x4B is the real destination writer, but its
- * yb_xb/yn_xn registers are not populated in the same way as M50. Keep the
- * generic raw.c unchanged and translate only these camera binding reads from
- * Canon's own RAW state, whose 3568x2000 geometry and +0x58 buffer were already
- * validated by the native RAW capture probes.
- *
- * For 14-bit packed RAW, pitch = width * 14 / 8 = 3568 * 7 / 4 = 6244 bytes.
- * raw_lv_get_resolution() reconstructs width as pitch*8/14 and height as
- * max(low16(yn_xn)+1, high16(yb_xb)+1).
- */
+/* Bilal DIGIC 8 behavior: no shamem layer on D8; validated 0xDxxxxxxx
+ * addresses are read directly. RAW_LV_EDMAC_CHANNEL_ADDR is supplied by
+ * consts.h and is M6II Canon logical EDMAC channel 3. */
 uint32_t shamem_read(uint32_t addr)
 {
-    if (addr == M6II_RAW_EDMAC_RAM_ADDR)
-    {
-        uint32_t hw = *(volatile uint32_t *)addr;
-        if (hw)
-            return hw;
-        return m6ii_raw_state32(M6II_RAW_BUFFER_OFF);
-    }
-
-    if (addr == M6II_RAW_EDMAC_YB_XB)
-    {
-        uint32_t width = m6ii_raw_state32(M6II_RAW_WIDTH_OFF);
-        uint32_t height = m6ii_raw_state32(M6II_RAW_HEIGHT_OFF);
-        if (!width || !height)
-            return 0;
-        uint32_t pitch = (width * 7u) / 4u;
-        return ((height - 1u) << 16) | (pitch & 0xffffu);
-    }
-
-    if (addr == M6II_RAW_EDMAC_YN_XN)
-    {
-        uint32_t height = m6ii_raw_state32(M6II_RAW_HEIGHT_OFF);
-        return height ? (height - 1u) : 0;
-    }
-
-    /* Match Bilal's D8 compatibility behavior for all other validated MMIO. */
     if ((addr >> 28) != 0xD)
     {
         DryosDebugMsg(0, 15, "shamem_read from %08x - aborted", addr);
         return 0;
     }
 
-    return *(volatile uint32_t *)addr;
+    return *(uintptr_t*)addr;
 }
 
 /* Same compatibility exports used by Bilal's M50 port. SRM is intentionally
