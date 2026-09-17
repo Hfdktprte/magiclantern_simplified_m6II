@@ -23,17 +23,13 @@
 /* has LV */
 #define CONFIG_LIVEVIEW
 
-/* Bilal-style RAW video: CBR_VSYNC from EVF state object drives RAW EDMAC redirection. */
 #define CONFIG_STATE_OBJECT_HOOKS
 #define CONFIG_EVF_STATE_SYNC
+
 #define CONFIG_NO_DEDICATED_MOVIE_MODE
 
-// Bilal D8 mlv_lite compatibility path; platform backend is supplied separately.
+// include edmac-d8.c from platform dir
 #define CONFIG_EDMAC_MEMCPY_D8
-
-/* Same RAW-EDMAC redirection path used by Bilal's M50 RAW-video port.
- * M6II camera-specific RAW writer MMIO is supplied by RAW_LV_EDMAC_CHANNEL_ADDR. */
-#define CONFIG_EDMAC_RAW_PATCH
 
 /** Large total memory, leading to unusual memory mapping,
  * CACHEABLE / UNCACHEABLE changes
