@@ -19,8 +19,11 @@ RESTARTSTART = 0xb8d20 # 0xb0078 in ROM
 # Keep bpp fixed at native 14-bit for first mlv_lite bring-up; do not touch an
 # unverified D8 PACK32 register. shamem_read() currently returns 0, so the
 # generic request path becomes a no-op when mlv_lite requests 14-bit.
+# SHAD_GAIN_REGISTER is likewise only a compile-time placeholder while the
+# M6II shamem_read override is a no-op; do not borrow M50's unverified address.
 CFLAGS_PLATFORM = -mthumb -mlong-calls \
     -DRAW_LV_EDMAC_CHANNEL_ADDR=0xD04C0300u \
+    -DSHAD_GAIN_REGISTER=0u \
     -DPACK32_MODE=0u \
     -DMODE_10BIT=0u -DMODE_12BIT=0u -DMODE_14BIT=0u -DMODE_16BIT=0u
 PLATFORM_ARCH = armv7-a
