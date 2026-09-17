@@ -54,7 +54,9 @@ static uint32_t m6ii_state32(uint32_t off)
     return *(volatile uint32_t *)(M6II_RAW_STATE_BASE + off);
 }
 
-static __attribute__((noinline)) uint32_t m6ii_raw_choose_addr(uint32_t canon_addr)
+/* Referenced by name from the naked assembly hook, so this symbol must have
+ * external linkage and must not be discarded by the compiler/linker. */
+__attribute__((noinline,used)) uint32_t m6ii_raw_choose_addr(uint32_t canon_addr)
 {
     uint32_t phase = m6ii_redirect_phase;
 
