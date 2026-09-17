@@ -33,6 +33,10 @@
 #include "fps.h"
 #include "platform/state-object.h"
 
+#ifdef CONFIG_EDMAC_RAW_PATCH
+#include "patch.h"
+#endif
+
 #undef RAW_DEBUG        /* define it to help with porting */
 #undef RAW_DEBUG_DUMP   /* if you want to save the raw image buffer and the DNG from here */
 #undef RAW_DEBUG_BLACK  /* for checking black level calibration */
@@ -459,15 +463,6 @@ static int get_default_white_level()
      -797, 10000,    2424, 10000,   7010, 10000
 #endif
 
-#ifdef CONFIG_M6II // from https://github.com/LibRaw/LibRaw src/tables/colordata.cpp
-    // 	{ LIBRAW_CAMERAMAKER_Canon, "EOS M6 Mark II", 0, 0,
-    //    { 11498,-3759,-1516,-5073,12954,2349,-892,1867,6118 } }, },
-    #define CAM_COLORMATRIX1 \
-    11498, 10000,   -3759, 10000,  -1516, 10000, \
-    -5073, 10000,   12954, 10000,   2349, 10000, \
-     -892, 10000,    1867, 10000,   6118, 10000
-#endif
-
 #ifdef CONFIG_SX740
     // copy from EOS R, as there's no data available now
     #define CAM_COLORMATRIX1 \
@@ -584,7 +579,8 @@ static int dynamic_ranges[] = {1196, 1170, 1139, 1087, 1019, 938, 848, 756, 664}
 #endif
 
 #if defined(CONFIG_80D)
-static int dynamic_ranges[] = {1233, 1180, 1093, 1008, 921, 837, 756, 648, 560};
+//same sensor
+static int dynamic_ranges[] = {1317, 1264, 1176, 1092, 1005, 921, 840, 731, 644};
 #endif
 
 #ifdef CONFIG_850D
@@ -609,21 +605,15 @@ static int dynamic_ranges[] = {1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685,
 static int dynamic_ranges[] = {1105, 1086, 1065, 1038, 1000, 936, 846, 773, 676, 585, 499};
 #endif
 
+// TODO: DxO graph is corrupted, so leaving R values for now
 #ifdef CONFIG_R5
-static int dynamic_ranges[] = {1333, 1218, 1255, 1127, 1038, 939, 845, 747, 643, 552, 452};
+static int dynamic_ranges[] = {1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685, 599, 507};
 #endif
 
 /** M50 data missing from DxO.
  *  For now I just copied R
  */
 #ifdef CONFIG_M50
-static int dynamic_ranges[] = {1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685, 599};
-#endif
-
-/** M6 Mark II data missing from DxO.
- *  For now I just copied R
- */
-#ifdef CONFIG_M6II
 static int dynamic_ranges[] = {1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685, 599};
 #endif
 
@@ -892,7 +882,7 @@ int raw_update_params_work()
     int mv640crop = mv && video_mode_resolution == 2 && video_mode_crop;
     int zoom = lv_dispsize > 1;
 
-    // FIXME SJE what is this terrible hack?  Presumably much better to fix the code instead of hiding errors?
+    // FIXME SJE wtf is this terrible hack.  How about we fix the code instead of hiding errors?
     /* silence warnings; not all cameras have all these modes */
     (void)mv640; (void)mv720; (void)mv1080; (void)mv1080crop; (void)mv640crop; (void)zoom;
 
@@ -1040,7 +1030,7 @@ int raw_update_params_work()
         // Being in the black region should work, exact alignment may need correcting
         // for actual raw capture.
         skip_top    = 20;
-        skip_left   = 0; // we can't crop properly yet, so this must be 0
+        skip_left   = 144;
         #endif
 
         #ifdef CONFIG_200D
@@ -1063,6 +1053,12 @@ int raw_update_params_work()
         skip_top    = 28;
         skip_left   = 144; // 146 could work, too
         skip_right  = zoom ? 0 : 8;
+        #endif
+
+        #ifdef CONFIG_M50
+        // FIXME: add 4K skip values, these are for 1080p
+        skip_top    = 34;
+        skip_left   = 88;
         #endif
 
         dbg_printf("LV raw buffer: %x (%dx%d)\n", raw_info.buffer, width, height);
@@ -2173,13 +2169,104 @@ int _raw_lv_get_iso_post_gain()
 
 #endif // CONFIG_EDMAC_RAW_SLURP
 
+#ifdef CONFIG_EDMAC_RAW_PATCH
+
+#define EDMAC_SET_SIZE_ADDR  0xE054A9BA
+#define EDMAC_RAW_CHANNEL  3
+
+void edmac_raw_adjust_pitch( uint32_t channel, struct edmac_info *edmac_config)
+{
+
+    if (channel != EDMAC_RAW_CHANNEL || !edmac_config->xb || !edmac_config->yb)
+        return;
+
+    uint32_t  raw_pitch_14bpp = edmac_config->xb;
+    uint32_t  width =  raw_pitch_14bpp * 8 / 14;
+    uint32_t  pitch = width * raw_info.bits_per_pixel / 8;
+
+    edmac_config->xb = pitch;
+
+}
+
+void __attribute__((noinline,naked,aligned(4)))
+raw_lv_setedmac_hook(void)
+{
+    asm volatile(
+        /* preserve registers */
+        "push {r0-r11, lr}\n"
+
+        /* keep AAPCS stack alignment */
+        "sub  sp, #4\n"
+
+        /* call edmac_raw_adjust_pitch(r0, r1) */
+        "mov  r3, %0\n"
+        "blx  r3\n"
+
+        /* restore registers */
+        "add  sp, #4\n"
+        "pop  {r0-r11, lr}\n"
+
+        /* overwritten instructions */
+        "push {r4,r5,r6,r7,r8,r9,r10,r11,lr}\n"
+        "mov  r5, r0\n"
+
+        /* original: ldr r0, =0xE0DD7BA0, this avoid "offset out of range" message in compiler */
+        "movw r0, #0x7BA0\n"
+        "movt r0, #0xE0DD\n"
+
+        /* original: ldr pc, =0xE054A9C3, this avoid "offset out of range" message in compiler */
+        "movw r3, #0xA9C3\n"
+        "movt r3, #0xE054\n"
+        "bx   r3\n"
+        :
+        : "r"(edmac_raw_adjust_pitch)
+        : "r3"
+    );
+}
+
+int install_edmac_raw_patch (void)
+{
+#ifdef CONFIG_M50
+    struct function_hook_patch edmac_raw_patch_defs[] = {
+    {
+        .patch_addr = EDMAC_SET_SIZE_ADDR, // edmac_set_size
+        .orig_content = {0x2d, 0xE9, 0xF0, 0x4F, 0x05, 0x46, 0x83, 0x48},
+        .target_function_addr = (uint32_t)raw_lv_setedmac_hook,
+        .description = "RAW EDMAC"
+    },
+};
+
+struct patch edmac_raw_patches[COUNT(edmac_raw_patch_defs)] = {};
+uint8_t edmac_raw_hook_code[8 * COUNT(edmac_raw_patch_defs)] = {};
+
+    for (int i = 0; i < COUNT(edmac_raw_patch_defs); i++)
+    {
+        if (convert_f_patch_to_patch(&edmac_raw_patch_defs[i],
+                                         &edmac_raw_patches[i],
+                                         &edmac_raw_hook_code[8 * i]))
+         {
+            return 1;
+         }
+    }
+
+    apply_patches(edmac_raw_patches, COUNT(edmac_raw_patch_defs));
+#endif
+}
+#endif // CONFIG_EDMAC_RAW_PATCH
+
 int raw_lv_settings_still_valid()
 {
     /* should be fast enough for vsync calls */
     if (!lv_raw_enabled) return 0;
     int w, h;
     if (!raw_lv_get_resolution(&w, &h)) return 0;
+#if defined(CONFIG_M50)
+    if (w != (raw_info.width * raw_info.bits_per_pixel) / 14
+        || h != raw_info.height)
+        return 0;
+#else
     if (w != raw_info.width || h != raw_info.height) return 0;
+#endif
     return 1;
 }
 #endif // CONFIG_RAW_LIVEVIEW
@@ -2467,6 +2554,9 @@ static void raw_lv_enable()
     //call("lv_set_raw_wp", 0);
 #endif
     call("lv_save_raw", 1);
+#ifdef CONFIG_EDMAC_RAW_PATCH
+    install_edmac_raw_patch();
+#endif
 #endif
 
 #ifdef DEFAULT_RAW_BUFFER
@@ -2509,6 +2599,9 @@ static void raw_lv_disable()
 
 #ifndef CONFIG_EDMAC_RAW_SLURP
     call("lv_save_raw", 0);
+#ifdef CONFIG_EDMAC_RAW_PATCH
+    unpatch_memory(EDMAC_SET_SIZE_ADDR);
+#endif
 #endif
 
 #ifdef CONFIG_ALLOCATE_RAW_LV_BUFFER
@@ -2622,13 +2715,8 @@ void raw_lv_request_bpp(int bpp)
             MODE_12BIT = 0x010,
             MODE_10BIT = 0x000,
         };
-    #elif defined(CONFIG_200D) | defined(CONFIG_6D2) | defined(CONFIG_7D2)
-    // FIXME currently doesn't do anything for 6D2 or 7D2 since
-    // EngDrvOut() is a nop there.  Some definition of the enum is required to build.
-    // See 200D for a safe filtered EngDrvOut() - which probably should be more
-    // like property_whitelist, more global, with per cam config.
+    #elif defined(CONFIG_200D)
         const uint32_t PACK32_MODE = 0xd0008094; // plausible from rom, e.g. e0159eee on 200d 1.0.1,
-                                                 // e0228742 on 6D2 1.0.5,
                                                  // compare 5d3 1.2.3 ff57c7c8
         enum {
             MODE_16BIT = 0x20, // unknown, copying 14 bit for now
@@ -2642,19 +2730,35 @@ void raw_lv_request_bpp(int bpp)
 //            MODE_12BIT = 0x300, // likely 8 or 16.  Alternates high and low values, could fit bayer or UYUV etc
 //            MODE_12BIT = 0x2000, // possibly 24 bit?
         };
+    #elif defined(CONFIG_DIGIC_VIII)
+        enum {
+            MODE_16BIT = 0x2, // unknown, copying 14 bit for now
+            MODE_14BIT = 0x2, // default value, 14-bit
+            MODE_12BIT = 0x1, //                12-bit
+            MODE_10BIT = 0x0, //                10-bit
+        };
+	    const uint32_t PACK32_MODE = PackMode_Field_ADDR_For_RAW_LV_EDMAC_CHANNEL;
     #endif
     const uint32_t modes[] = { MODE_10BIT, MODE_12BIT, MODE_14BIT, MODE_16BIT};
 
     int bpp_index = COERCE((bpp-10)/2, 0, COUNT(modes));
 
+    #if defined(CONFIG_DIGIC_VIII)
+    if (PACK32_MODE == modes[bpp_index])
+    #else
     if (shamem_read(PACK32_MODE) == modes[bpp_index])
+    #endif
     {
         /* no change needed */
         ASSERT(raw_info.bits_per_pixel == bpp);
     }
     else
     {
+        #if defined(CONFIG_DIGIC_VIII)
+        MEM(PACK32_MODE) = modes[bpp_index];
+        #else
         EngDrvOut(PACK32_MODE, modes[bpp_index]);
+        #endif
         raw_info.bits_per_pixel = bpp;
         raw_info.pitch = raw_info.width * raw_info.bits_per_pixel / 8;
         raw_info.frame_size = raw_info.pitch * raw_info.height;
