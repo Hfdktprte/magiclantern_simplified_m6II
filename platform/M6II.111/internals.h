@@ -31,6 +31,10 @@
 // Bilal D8 mlv_lite compatibility path; platform backend is supplied separately.
 #define CONFIG_EDMAC_MEMCPY_D8
 
+/* Same RAW-EDMAC redirection path used by Bilal's M50 RAW-video port.
+ * M6II camera-specific RAW writer MMIO is supplied by RAW_LV_EDMAC_CHANNEL_ADDR. */
+#define CONFIG_EDMAC_RAW_PATCH
+
 /** Large total memory, leading to unusual memory mapping,
  * CACHEABLE / UNCACHEABLE changes
  */
