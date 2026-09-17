@@ -7,6 +7,8 @@
  * LiveView path can be entered and left reliably on M6II.111.
  */
 
+#ifndef CONFIG_HELLO_WORLD
+
 #include <dryos.h>
 #include <bmp.h>
 #include <menu.h>
@@ -125,3 +127,5 @@ static void m6ii_raw_probe_init()
 }
 
 INIT_FUNC(__FILE__, m6ii_raw_probe_init);
+
+#endif /* !CONFIG_HELLO_WORLD */
