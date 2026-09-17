@@ -22,11 +22,6 @@
 #define M6II_EDMAC_MODE             0
 #define M6II_EDMAC_LOG              "M6II_EDMAC_TEST.TXT"
 
-/*
- * M6II ROM 1.1.1 / internal 5.9.2, Canon MemoryToMemoryEsub5 helpers.
- * These wrappers keep Canon's own channel/Boomer setup logic in control.
- * Thumb function pointers must have bit 0 set.
- */
 typedef void (*m6ii_esub5_setup_fn)(const uint32_t *channels);
 typedef void (*m6ii_esub5_void_fn)(void);
 typedef void (*m6ii_esub5_addr_fn)(const uint32_t *addresses);
@@ -44,7 +39,6 @@ extern void PwrMng_WakeSubChips(const uint32_t *list);
 extern void PwrMng_SuspendSubChips(const uint32_t *list);
 
 static volatile int m6ii_edmac_busy = 0;
-/* EsubN maps to power-manager subchip N-1 on DIGIC 8; terminate with 7. */
 static const uint32_t m6ii_esub5_devices[] = {4, 7};
 
 static uint32_t m6ii_checksum32(const volatile uint32_t *p, uint32_t bytes)
@@ -61,11 +55,6 @@ static void m6ii_edmac_test_run()
     if (m6ii_edmac_busy)
     {
         NotifyBox(2000, "EDMAC test already running");
-        return;
-    }
-    if (RECORDING)
-    {
-        NotifyBox(3000, "Stop Canon recording first");
         return;
     }
 
@@ -96,17 +85,15 @@ static void m6ii_edmac_test_run()
         src[i] = 0x6d360000u ^ (i * 0x10204081u);
         dst[i] = 0;
     }
-    src[words - 1] = 0x4d36444d; /* M6DM */
+    src[words - 1] = 0x4d36444d;
     dst[words - 1] = 0;
     checksum_src = m6ii_checksum32(src, M6II_EDMAC_TEST_SIZE);
     stage = 1;
 
-    /* D8 EDMAC accesses hard-lock if the corresponding subchip is asleep. */
     PwrMng_WakeSubChips(m6ii_esub5_devices);
     domain_awake = 1;
     stage = 2;
 
-    /* Canon's Esub5 setup selects the M6II-native Boomer config for channel 58. */
     const uint32_t channels[2] = { M6II_EDMAC_RD_CH, M6II_EDMAC_WR_CH };
     M6II_ESUB5_SETUP(channels);
     esub_setup = 1;
@@ -134,7 +121,6 @@ static void m6ii_edmac_test_run()
     uint64_t t0 = get_us_clock();
     M6II_ESUB5_START();
 
-    /* Poll DMA memory only; no EDMAC MMIO reads. */
     for (int i = 0; i < 200; i++)
     {
         if (dst[words - 1] == src[words - 1])
