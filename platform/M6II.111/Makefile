@@ -29,7 +29,9 @@ CFLAGS_PLATFORM = -mthumb -mlong-calls \
 PLATFORM_ARCH = armv7-a
 
 ML_BOOT_OBJ = boot-d678.o
-ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/function_overrides.o
+# Match Bilal's M50 integration: the D8 memcpy compatibility backend must be
+# linked into the core so mlv_lite.mo can resolve its exported symbols.
+ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/function_overrides.o edmac-d8.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/test_features.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_state_probe.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_dump_probe.o
