@@ -23,8 +23,13 @@
 /* has LV */
 #define CONFIG_LIVEVIEW
 
-/* hooking EFV_STATE ends with EvfCap crashes, requires investigation */
+/* Bilal-style RAW video: CBR_VSYNC from EVF state object drives RAW EDMAC redirection. */
 #define CONFIG_STATE_OBJECT_HOOKS
+#define CONFIG_EVF_STATE_SYNC
+#define CONFIG_NO_DEDICATED_MOVIE_MODE
+
+// Bilal D8 mlv_lite compatibility path; platform backend is supplied separately.
+#define CONFIG_EDMAC_MEMCPY_D8
 
 /** Large total memory, leading to unusual memory mapping,
  * CACHEABLE / UNCACHEABLE changes
