@@ -10,14 +10,16 @@
 #endif
 
 /*
- * Bilal's raw.c expects a per-camera dynamic_ranges table for the photo-LV
- * DXO estimator. This fallback mirrors Bilal's M50 temporary table and is not
- * used by RAW EDMAC geometry, buffer redirection, or mlv_lite frame capture.
- * Mark it unused because this compatibility header is force-included for all
- * M6II translation units, while raw.c is the only one that references it.
+ * Bilal's raw.c expects a per-camera dynamic_ranges object for the photo-LV
+ * DXO estimator. Keep this preprocessor-only because raw_compat.h is force-
+ * included while preprocessing both C sources and magiclantern.lds.S.
+ * A real C definition here would leak into the linker script.
+ * This table is unrelated to RAW EDMAC geometry/redirection/mlv_lite capture.
  */
-static int dynamic_ranges[] __attribute__((unused)) = {
-    1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685, 599
-};
+#ifndef dynamic_ranges
+#define dynamic_ranges ((int[]){ \
+    1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685, 599 \
+})
+#endif
 
 #endif /* M6II_RAW_COMPAT_H */
