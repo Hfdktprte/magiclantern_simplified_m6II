@@ -37,15 +37,17 @@ the verifier reports the supported 5.9.2 target.
    - `script.req`
 
 4. Insert the card and start the camera normally.
-5. Press **PLAY**, then **SET** to trigger Canon Basic.
-6. Wait a few seconds for card activity, then power the camera off normally.
-7. Read `M6II_INFO.TXT` from the card. `CAM_INFO.XML` may also be created.
+5. Enter playback with **PLAY**, then press **SET** once to trigger Canon Basic.
+6. Wait about 5 seconds, then power the camera off normally.
+7. Read `M6II_INFO.TXT` from the card root.
 8. Continue only when the camera menu reports Canon firmware 1.1.1 and the
    internal ROM information identifies **5.9.2**. If it reports 5.9.3, is blank,
    or the script does not run, stop here.
 
-The verifier only reads firmware information and writes text/XML files to the SD
-card. It does not call `EnableBootDisk()`.
+The verifier only reads firmware information and writes one text file to the SD
+card. It does not call `EnableBootDisk()`. On EOS/DIGIC 8 Canon Basic, the card is
+addressed as `B:/`; this matches the maintained firmware-signature example tested
+on EOS R / R6.
 
 ## Stage 2 - enable the camera BOOTDISK flag
 
@@ -55,16 +57,16 @@ Do this only after Stage 1 passes.
 2. Delete the Stage 1 `extend.m` and copy `enable/extend.m` plus
    `enable/script.req` to the card root.
 3. Insert the card and start the camera normally.
-4. Press **PLAY**, then **SET**.
-5. Wait a few seconds, then power the camera off normally.
-6. Check the card for `BOOTDISK_ENABLED.TXT`.
+4. Enter playback with **PLAY**, then press **SET** once.
+5. Wait about 5 seconds, then power the camera off normally.
 
-The enable script calls Canon's own `EnableBootDisk()` function. This is the one
-persistent camera-side change required for normal Magic Lantern autoboot.
+The enable script intentionally contains only `EnableBootDisk()`, matching the
+maintained `Universal/extend_bootdisk.m` behavior. There is no completion marker;
+this minimizes extra Canon Basic calls during the persistent step.
 
 ## Stage 3 - make the Magic Lantern runtime card bootable
 
-Only after `BOOTDISK_ENABLED.TXT` exists:
+After Stage 2:
 
 1. Put the SD card back in the computer.
 2. In EOSCard:
@@ -82,8 +84,9 @@ Only after `BOOTDISK_ENABLED.TXT` exists:
 5. Safely eject the card, insert it in the camera and simply power the camera on.
    Do **not** select Firmware Update.
 
-If the camera boots Canon firmware but Magic Lantern does not start, stop and
-inspect the card flags/files rather than repeatedly modifying the camera flag.
+If the camera simply boots Canon firmware and Magic Lantern does not start, the
+persistent BOOTDISK call may not have executed. Return to a SCRIPT-only card and
+re-check the Canon Basic setup rather than repeatedly changing unrelated flags.
 
 ## Recovery / disable BOOTDISK
 
@@ -91,18 +94,20 @@ To reverse the persistent camera flag:
 
 1. Use a card marked **SCRIPT only**, not a BOOTDISK autoboot card.
 2. Copy `disable/extend.m` and `disable/script.req` to its root.
-3. Boot normally, press **PLAY**, then **SET**.
-4. Power off and verify `BOOTDISK_DISABLED.TXT` was created.
-5. Remove any BOOTDISK marking from cards you want to use as normal Canon cards.
+3. Boot normally, enter playback, press **SET** once.
+4. Wait about 5 seconds and power off normally.
+5. Remove the BOOTDISK marking from cards you want to use as normal Canon cards.
+
+The disable script intentionally contains only `DisableBootDisk()`.
 
 ## Files
 
-- `verify/extend.m` - read-only M6II firmware/ROM information probe.
-- `enable/extend.m` - calls `EnableBootDisk()` and writes a completion marker.
-- `disable/extend.m` - calls `DisableBootDisk()` and writes a completion marker.
-- each stage contains the required `script.req`.
+- `verify/extend.m` - read-only M6II firmware/ROM information probe, writes to `B:/M6II_INFO.TXT`.
+- `enable/extend.m` - calls only `EnableBootDisk()`.
+- `disable/extend.m` - calls only `DisableBootDisk()`.
+- each stage contains the required `script.req` (`for DC_scriptdisk`).
 
-The BOOTDISK enable/disable calls are intentionally tiny and are based on the
-maintained Canon Basic `Universal/extend_bootdisk.m` example. The M6II verifier
-uses the DIGIC 8 firmware-information pattern and the M6II `E0040000` main ROM
-base used by the current port.
+The BOOTDISK calls are based on the maintained Canon Basic
+`Universal/extend_bootdisk.m` example. The verifier is adapted from
+`Universal/extend_fw_sign.m`, using the DIGIC 8 `E0040000` ROM0 base and the EOS
+`B:/` card path.
