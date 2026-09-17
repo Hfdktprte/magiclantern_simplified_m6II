@@ -28,6 +28,7 @@ ML_BOOT_OBJ = boot-d678.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/function_overrides.o edmac-d8.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/test_features.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_state_probe.o
+ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_edmac_poll_probe.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_dump_probe.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_burst_rec.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_ram_mlv_rec.o
