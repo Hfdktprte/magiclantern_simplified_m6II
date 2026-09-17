@@ -8,7 +8,9 @@ FIR_BASE = 0x800120
 
 #CANON_FIR  = M6200111.FIR
 FIRMWARE_ID = 0x00000811
-MAIN_FIRMWARE_ADDR = 0xE0000000
+# ML boot/link firmware entry base. This is NOT the ROM0 dump base.
+# M6II boots Canon firmware at 0xE0040000; ROM analysis may use a 0xE0000000 image base.
+MAIN_FIRMWARE_ADDR = 0xE0040000
 
 # user_mem_start from cstart struct. Align to 0x10 up
 RESTARTSTART = 0xb8d20 # 0xb0078 in ROM
