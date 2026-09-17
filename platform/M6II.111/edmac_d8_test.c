@@ -1,9 +1,14 @@
 /** \file
- * EOS M6 Mark II full-frame FrameToLinear RAW scaling test.
+ * EOS M6 Mark II one-frame native RAW EDMAC redirect test.
  *
- * v5 proved one line and v6 proved 128 lines through Canon's native
- * MemifWrap + CopyEsub6 frame-memory path. v7 requests all 2000 lines
- * with the exact same channels/resources/mapping.
+ * ROM-derived M6II 1.1.1 RAW path:
+ *   Engine::ShtRawAutoPath programs RAW destination EDMAC channel 0x4B.
+ *   Channel 0x4B maps to MMIO block 0xD04C0300 (ram_addr +0xA0), but this
+ *   test deliberately does NOT poke MMIO.  Instead it hooks Canon's exact
+ *   edmac_set_address call at 0xE0646074 and substitutes one destination
+ *   argument.  The following Canon frame submission automatically restores
+ *   the original destination, which provides a real frame-boundary completion
+ *   marker without sleeps or a guessed VSYNC hook.
  */
 
 #ifndef CONFIG_HELLO_WORLD
@@ -13,200 +18,325 @@
 #include <menu.h>
 #include <timer.h>
 #include <propvalues.h>
+#include <patch.h>
 
-#define M6II_RAW_STATE_BASE       0x00010970u
-#define M6II_RAW_WIDTH_EXPECTED   3568u
-#define M6II_RAW_HEIGHT_EXPECTED  2000u
-#define M6II_TAP_LINES            2000u
-#define M6II_TAP_DST_BYTES        (16u * 1024u * 1024u)
-#define M6II_TAP_FILL             0xA5u
-#define M6II_TAP_LOG              "M6II_FRAME_FULL.TXT"
+#define M6II_RAW_STATE_BASE          0x00010970u
+#define M6II_RAW_ENGINE_STATE        0x0002909Cu
+#define M6II_RAW_WIDTH_EXPECTED      3568u
+#define M6II_RAW_HEIGHT_EXPECTED     2000u
+#define M6II_RAW_FRAME_BYTES         ((M6II_RAW_WIDTH_EXPECTED * M6II_RAW_HEIGHT_EXPECTED * 7u) / 4u)
+#define M6II_RAW_GUARD_BYTES         4096u
+#define M6II_RAW_ALLOC_BYTES         (M6II_RAW_FRAME_BYTES + M6II_RAW_GUARD_BYTES)
+#define M6II_FILL                    0xA5u
+#define M6II_LOG                     "M6II_RAW_REDIRECT.TXT"
 
-#define M6II_FRAME_RD_CH          0x40u
-#define M6II_LINEAR_WR_CH         0x1Au
-static uint32_t m6ii_frame_resources[] = { 0x00060064u, 0x0006006Eu };
-static const uint32_t m6ii_frame_devices[] = { 5u, 7u };
-static const uint32_t m6ii_frame_channels[] = { M6II_FRAME_RD_CH, M6II_LINEAR_WR_CH };
-
-typedef void (*m6ii_void_fn)(void);
-typedef void (*m6ii_ptr_fn)(const void *p);
-typedef uint32_t (*m6ii_memif_fn)(uint32_t index, uint32_t base, uint32_t bandwidth_bytes);
-typedef void (*m6ii_power_fn)(const uint32_t *list);
-typedef struct LockEntry *(*m6ii_create_lock_fn)(uint32_t *resources, uint32_t count);
-typedef unsigned int (*m6ii_lock_fn)(struct LockEntry *lock);
-
-#define M6II_COPYE6_INIT       ((m6ii_ptr_fn)(0xE009DC54u | 1u))
-#define M6II_COPYE6_TRANSFER   ((m6ii_ptr_fn)(0xE009DC80u | 1u))
-#define M6II_COPYE6_CLEANUP    ((m6ii_void_fn)(0xE009DCF0u | 1u))
-#define M6II_MEMIF_WRAP        ((m6ii_memif_fn)(0xE0065624u | 1u))
-#define M6II_PWR_WAKE          ((m6ii_power_fn)(0xE0630EB6u | 1u))
-#define M6II_PWR_SUSPEND       ((m6ii_power_fn)(0xE0630EE4u | 1u))
-#define M6II_CREATE_LOCK       ((m6ii_create_lock_fn)(0xE057978Au | 1u))
-#define M6II_LOCK_RESOURCES    ((m6ii_lock_fn)(0xE0579972u | 1u))
-#define M6II_UNLOCK_RESOURCES  ((m6ii_lock_fn)(0xE0579A0Cu | 1u))
-#define M6II_DELETE_LOCK       ((m6ii_lock_fn)(0xE057986Eu | 1u))
+/*
+ * Canon code at E0646074 (Thumb):
+ *   01 68          ldr r1,[r0]          ; submitted frame address
+ *   28 6d          ldr r0,[r5,#0x50]    ; RAW dst channel = 0x4B
+ *   3a f7 73 fc    bl  E0580962         ; edmac_set_address(channel,address)
+ *
+ * Patch exactly these 8 bytes, then continue at E064607C.
+ */
+#define M6II_RAW_ADDR_PATCH          0xE0646074u
+#define M6II_RAW_ADDR_CONTINUE       0xE064607Du
+#define M6II_EDMAC_SET_ADDRESS       0xE0580963u
+#define M6II_RAW_DST_CHANNEL         0x4Bu
+#define M6II_RAW_DST_MMIO            0xD04C0300u
+#define M6II_RAW_DST_RAM_ADDR_REG    0xD04C03A0u
 
 extern void *_alloc_dma_memory(size_t size);
 
-static volatile int m6ii_frame_tap_busy = 0;
+static volatile int m6ii_redirect_busy = 0;
+static volatile uint32_t m6ii_redirect_phase = 0;
+static volatile uint32_t m6ii_redirect_hits = 0;
+static volatile uint32_t m6ii_redirect_dst = 0;
+static volatile uint32_t m6ii_first_canon_addr = 0;
+static volatile uint32_t m6ii_restore_canon_addr = 0;
 
-static uint32_t raw_state_read(uint32_t off)
+static struct patch m6ii_redirect_patch;
+static uint8_t m6ii_redirect_hook_mem[8];
+
+static uint32_t m6ii_state32(uint32_t off)
 {
     return *(volatile uint32_t *)(M6II_RAW_STATE_BASE + off);
 }
 
-static uint32_t round_up_512(uint32_t v)
+/*
+ * Called from the Canon RAW submission hook.
+ * phase 0: passthrough
+ * phase 1: redirect exactly this submitted frame to ML RAM
+ * phase 2: next Canon submission is the frame-boundary completion marker;
+ *          pass Canon's address unchanged and mark restore complete
+ * phase 3: passthrough until the task removes the ROM hook
+ */
+static __attribute__((noinline)) uint32_t m6ii_raw_choose_addr(uint32_t canon_addr)
 {
-    return (v + 0x1ffu) & ~0x1ffu;
+    uint32_t phase = m6ii_redirect_phase;
+
+    if (phase == 1)
+    {
+        m6ii_first_canon_addr = canon_addr;
+        m6ii_redirect_hits++;
+        m6ii_redirect_phase = 2;
+        return m6ii_redirect_dst;
+    }
+
+    if (phase == 2)
+    {
+        m6ii_restore_canon_addr = canon_addr;
+        m6ii_redirect_hits++;
+        m6ii_redirect_phase = 3;
+        return canon_addr;
+    }
+
+    return canon_addr;
+}
+
+/*
+ * Replacement for the 8 bytes at E0646074.
+ * At entry Canon already executed:
+ *   push {r4,r5,r6,lr}; mov r4,r0; ldr r5,=0x0002909C
+ * Therefore r4 is the frame-request pointer and r5 is RAW engine state.
+ * Emulate the overwritten instructions, changing only r1 for one frame.
+ */
+static void __attribute__((naked,noinline)) m6ii_raw_addr_hook(void)
+{
+    __asm__ volatile(
+        "push {r2, r3, r6, lr}\n"
+        "ldr  r1, [r4]\n"
+        "mov  r0, r1\n"
+        "bl   m6ii_raw_choose_addr\n"
+        "mov  r1, r0\n"
+        "ldr  r0, [r5, #0x50]\n"
+        "ldr  r3, =0xE0580963\n"
+        "blx  r3\n"
+        "pop  {r2, r3, r6, lr}\n"
+        "ldr  r3, =0xE064607D\n"
+        "bx   r3\n"
+    );
 }
 
 static uint32_t changed_bytes(const volatile uint8_t *p, uint32_t n)
 {
     uint32_t changed = 0;
     for (uint32_t i = 0; i < n; i++)
-        if (p[i] != M6II_TAP_FILL) changed++;
+        if (p[i] != M6II_FILL)
+            changed++;
     return changed;
 }
 
 static uint32_t checksum32(const volatile uint32_t *p, uint32_t bytes)
 {
     uint32_t sum = 0;
-    for (uint32_t i = 0; i < bytes / 4; i++)
+    for (uint32_t i = 0; i < bytes / 4u; i++)
         sum = (sum << 5) - sum + p[i];
     return sum;
 }
 
-static void m6ii_frame_full_run()
+static uint32_t guard_mismatches(const volatile uint8_t *p, uint32_t n)
 {
-    if (m6ii_frame_tap_busy) { NotifyBox(2000, "Full-frame tap already running"); return; }
-    if (!LV_NON_PAUSED) { NotifyBox(3000, "Full-frame tap requires active LiveView"); return; }
-    if (RECORDING) { NotifyBox(3000, "Stop Canon recording first"); return; }
+    uint32_t mismatches = 0;
+    for (uint32_t i = 0; i < n; i++)
+        if (p[i] != M6II_FILL)
+            mismatches++;
+    return mismatches;
+}
 
-    m6ii_frame_tap_busy = 1;
+static int install_raw_addr_hook(void)
+{
+    struct function_hook_patch fp = {
+        .patch_addr = M6II_RAW_ADDR_PATCH,
+        .orig_content = { 0x01, 0x68, 0x28, 0x6d, 0x3a, 0xf7, 0x73, 0xfc },
+        .target_function_addr = (uint32_t)m6ii_raw_addr_hook,
+        .description = "M6II one-frame RAW EDMAC destination redirect",
+    };
+
+    memset(&m6ii_redirect_patch, 0, sizeof(m6ii_redirect_patch));
+    memset(m6ii_redirect_hook_mem, 0, sizeof(m6ii_redirect_hook_mem));
+
+    int ret = convert_f_patch_to_patch(&fp, &m6ii_redirect_patch, m6ii_redirect_hook_mem);
+    if (ret)
+        return ret;
+
+    return apply_patches(&m6ii_redirect_patch, 1);
+}
+
+static void m6ii_raw_redirect_test(void)
+{
+    if (m6ii_redirect_busy)
+    {
+        NotifyBox(2000, "RAW redirect already running");
+        return;
+    }
+    if (!LV_NON_PAUSED)
+    {
+        NotifyBox(3000, "RAW redirect needs active LiveView");
+        return;
+    }
+    if (RECORDING)
+    {
+        NotifyBox(3000, "Stop Canon recording first");
+        return;
+    }
+
+    m6ii_redirect_busy = 1;
 
     volatile uint8_t *dst = 0;
-    struct LockEntry *lock = 0;
-    int raw_enabled = 0, domain_awake = 0, copye6_ready = 0;
     int stage = 0;
-    int ret_mm = 0, ret_on = 0, ret_off = 0;
-    unsigned int lock_ret = 0xffffffffu, unlock_ret = 0xffffffffu, delete_ret = 0xffffffffu;
+    int raw_enabled = 0;
+    int hook_installed = 0;
+    int ret_mm = 0;
+    int ret_on = 0;
+    int ret_off = 0;
+    int patch_ret = 0xffffffffu;
+    int unpatch_ret = 0xffffffffu;
+    uint32_t width = 0, height = 0, raw_state_ptr = 0;
+    uint32_t engine_channel = 0;
+    uint32_t wait_ms = 0;
+    uint32_t changed = 0;
+    uint32_t checksum = 0;
+    uint32_t guard_bad = 0;
+    uint32_t first_words[8] = {0};
+    uint32_t last_words[8] = {0};
 
-    uint32_t width = 0, height = 0, raw_ptr = 0;
-    uint32_t map_base = 0, map_offset = 0, bandwidth = 0;
-    uint32_t offset_units = 0, src_x = 0, src_y = 0, memif_handle = 0;
-    uint32_t line_bytes = 0, requested_bytes = 0;
-    uint32_t elapsed_us = 0xffffffffu, verify_us = 0xffffffffu;
-    uint32_t changed_requested = 0, checksum_requested = 0;
-    uint32_t first_words[8], last_words[8];
-    memset(first_words, 0, sizeof(first_words));
-    memset(last_words, 0, sizeof(last_words));
-
-    dst = (volatile uint8_t *)_alloc_dma_memory(M6II_TAP_DST_BYTES);
-    if (!dst) { stage = -1; goto cleanup; }
-    memset((void *)dst, M6II_TAP_FILL, M6II_TAP_DST_BYTES);
+    dst = (volatile uint8_t *)_alloc_dma_memory(M6II_RAW_ALLOC_BYTES);
+    if (!dst)
+    {
+        stage = -1;
+        goto cleanup;
+    }
+    memset((void *)dst, M6II_FILL, M6II_RAW_ALLOC_BYTES);
+    m6ii_redirect_dst = (uint32_t)dst;
     stage = 1;
+
+    /* Install while redirect phase is zero: Canon sees no changed address yet. */
+    m6ii_redirect_phase = 0;
+    m6ii_redirect_hits = 0;
+    m6ii_first_canon_addr = 0;
+    m6ii_restore_canon_addr = 0;
+    patch_ret = install_raw_addr_hook();
+    if (patch_ret)
+    {
+        stage = -2;
+        goto cleanup;
+    }
+    hook_installed = 1;
+    stage = 2;
 
     ret_mm = call("lv_set_mm", 1);
     ret_on = call("lv_save_raw", 1);
     raw_enabled = 1;
-    msleep(250);
 
-    width = raw_state_read(0x10);
-    height = raw_state_read(0x14);
-    raw_ptr = raw_state_read(0x58);
-    if (!raw_ptr || width != M6II_RAW_WIDTH_EXPECTED || height != M6II_RAW_HEIGHT_EXPECTED)
-    { stage = -2; goto cleanup; }
+    /* Wait only for Canon's normal RAW path to become valid; this does not
+     * decide frame completion or restoration. */
+    for (wait_ms = 0; wait_ms < 1000; wait_ms++)
+    {
+        width = m6ii_state32(0x10);
+        height = m6ii_state32(0x14);
+        raw_state_ptr = m6ii_state32(0x58);
+        engine_channel = *(volatile uint32_t *)(M6II_RAW_ENGINE_STATE + 0x50u);
+        if (width == M6II_RAW_WIDTH_EXPECTED &&
+            height == M6II_RAW_HEIGHT_EXPECTED &&
+            raw_state_ptr && engine_channel == M6II_RAW_DST_CHANNEL)
+            break;
+        msleep(1);
+    }
 
-    map_base = raw_ptr & 0xffff0000u;
-    map_offset = raw_ptr - map_base;
-    bandwidth = round_up_512(width);
-    line_bytes = bandwidth * 2u;
-    requested_bytes = line_bytes * M6II_TAP_LINES;
-    if ((map_offset & 1u) || !bandwidth || requested_bytes > M6II_TAP_DST_BYTES)
-    { stage = -3; goto cleanup; }
-
-    offset_units = map_offset / 2u;
-    src_y = offset_units / bandwidth;
-    src_x = offset_units % bandwidth;
-
-    memif_handle = M6II_MEMIF_WRAP(0, map_base, bandwidth * 2u);
-    if (!memif_handle) { stage = -4; goto cleanup; }
-    stage = 2;
-
-    lock = M6II_CREATE_LOCK(m6ii_frame_resources, COUNT(m6ii_frame_resources));
-    if (!lock) { stage = -5; goto cleanup; }
-    lock_ret = M6II_LOCK_RESOURCES(lock);
+    if (width != M6II_RAW_WIDTH_EXPECTED ||
+        height != M6II_RAW_HEIGHT_EXPECTED ||
+        !raw_state_ptr || engine_channel != M6II_RAW_DST_CHANNEL)
+    {
+        stage = -3;
+        goto cleanup;
+    }
     stage = 3;
 
-    M6II_PWR_WAKE(m6ii_frame_devices);
-    domain_awake = 1;
-    M6II_COPYE6_INIT(m6ii_frame_channels);
-    copye6_ready = 1;
+    /* Arm exactly one destination substitution. The hook itself sees Canon's
+     * next submission boundary and the following one restores Canon. */
+    m6ii_redirect_phase = 1;
+
+    for (wait_ms = 0; wait_ms < 1500; wait_ms++)
+    {
+        if (m6ii_redirect_phase == 3)
+            break;
+        msleep(1);
+    }
+
+    if (m6ii_redirect_phase != 3 || m6ii_redirect_hits != 2)
+    {
+        stage = -4;
+        goto cleanup;
+    }
     stage = 4;
 
-    uint32_t d[13];
-    memset(d, 0, sizeof(d));
-    d[0] = 1u; d[1] = map_base; d[2] = bandwidth; d[3] = src_x; d[4] = src_y;
-    d[5] = 1u; d[6] = (uint32_t)dst; d[7] = bandwidth; d[8] = 0u; d[9] = 0u;
-    d[10] = bandwidth; d[11] = M6II_TAP_LINES; d[12] = memif_handle;
-
-    uint32_t t0 = (uint32_t)get_us_clock();
-    M6II_COPYE6_TRANSFER(d);
-    elapsed_us = (uint32_t)get_us_clock() - t0;
+    /* Canon has already submitted the following frame to its own address. */
+    unpatch_ret = unpatch_memory(M6II_RAW_ADDR_PATCH);
+    hook_installed = 0;
+    if (unpatch_ret)
+    {
+        stage = -5;
+        goto cleanup;
+    }
     stage = 5;
 
-    M6II_COPYE6_CLEANUP(); copye6_ready = 0;
-    M6II_PWR_SUSPEND(m6ii_frame_devices); domain_awake = 0;
-    unlock_ret = M6II_UNLOCK_RESOURCES(lock);
-    delete_ret = M6II_DELETE_LOCK(lock);
-    lock = 0;
-
-    ret_off = call("lv_save_raw", 0); raw_enabled = 0;
+    ret_off = call("lv_save_raw", 0);
+    raw_enabled = 0;
     stage = 6;
 
-    uint32_t tv = (uint32_t)get_us_clock();
-    changed_requested = changed_bytes(dst, requested_bytes);
-    checksum_requested = checksum32((const volatile uint32_t *)dst, requested_bytes);
-    verify_us = (uint32_t)get_us_clock() - tv;
-    for (int i = 0; i < 8; i++) first_words[i] = ((volatile uint32_t *)dst)[i];
-    volatile uint32_t *tail = (volatile uint32_t *)(dst + requested_bytes - 32u);
-    for (int i = 0; i < 8; i++) last_words[i] = tail[i];
+    changed = changed_bytes(dst, M6II_RAW_FRAME_BYTES);
+    checksum = checksum32((const volatile uint32_t *)dst, M6II_RAW_FRAME_BYTES);
+    guard_bad = guard_mismatches(dst + M6II_RAW_FRAME_BYTES, M6II_RAW_GUARD_BYTES);
+
+    for (int i = 0; i < 8; i++)
+        first_words[i] = ((volatile uint32_t *)dst)[i];
+    volatile uint32_t *tail = (volatile uint32_t *)(dst + M6II_RAW_FRAME_BYTES - 32u);
+    for (int i = 0; i < 8; i++)
+        last_words[i] = tail[i];
     stage = 7;
 
 cleanup:
-    if (copye6_ready) M6II_COPYE6_CLEANUP();
-    if (domain_awake) M6II_PWR_SUSPEND(m6ii_frame_devices);
-    if (lock) { unlock_ret = M6II_UNLOCK_RESOURCES(lock); delete_ret = M6II_DELETE_LOCK(lock); }
-    if (raw_enabled) { ret_off = call("lv_save_raw", 0); raw_enabled = 0; }
+    /* Always stop redirecting before touching the patch/RAW state. */
+    m6ii_redirect_phase = 0;
 
-    FILE *f = FIO_CreateFile(M6II_TAP_LOG);
+    if (hook_installed)
+    {
+        unpatch_ret = unpatch_memory(M6II_RAW_ADDR_PATCH);
+        hook_installed = 0;
+    }
+    if (raw_enabled)
+    {
+        ret_off = call("lv_save_raw", 0);
+        raw_enabled = 0;
+    }
+
+    FILE *f = FIO_CreateFile(M6II_LOG);
     if (f)
     {
         char text[2300];
         int len = snprintf(text, sizeof(text),
-            "M6II FrameToLinear RAW full-frame v7\n"
-            "width=0x%08x\nheight=0x%08x\nraw_ptr=0x%08x\n"
-            "map_base=0x%08x\nmap_offset=0x%08x\nbandwidth=0x%08x\n"
-            "src_x=0x%08x\nsrc_y=0x%08x\nmemif_handle=0x%08x\n"
-            "frame_rd_ch=0x%08x\nlinear_wr_ch=0x%08x\n"
-            "resource0=0x%08x\nresource1=0x%08x\npower_subchip=0x00000005\n"
-            "lines=0x%08x\nline_bytes=0x%08x\nrequested_bytes=0x%08x\n"
-            "dst=0x%08x\nstage=0x%08x\n"
+            "M6II native RAW EDMAC one-frame redirect v8\n"
+            "raw_dst_channel=0x%08x\nraw_dst_mmio=0x%08x\nram_addr_reg=0x%08x\n"
+            "patch_addr=0x%08x\ncontinue_addr=0x%08x\n"
+            "width=0x%08x\nheight=0x%08x\nframe_bytes=0x%08x\n"
+            "raw_state_ptr=0x%08x\nengine_channel=0x%08x\n"
+            "ml_dst=0x%08x\nfirst_canon_addr=0x%08x\nrestore_canon_addr=0x%08x\n"
+            "redirect_hits=0x%08x\nredirect_phase=0x%08x\n"
+            "stage=0x%08x\npatch_ret=0x%08x\nunpatch_ret=0x%08x\n"
             "ret_mm=0x%08x\nret_raw_on=0x%08x\nret_raw_off=0x%08x\n"
-            "lock_ret=0x%08x\nunlock_ret=0x%08x\ndelete_ret=0x%08x\n"
-            "elapsed_us=0x%08x\nverify_us=0x%08x\n"
-            "changed_requested=0x%08x\nchecksum_requested=0x%08x\n"
+            "changed_frame=0x%08x\nchecksum_frame=0x%08x\nguard_mismatches=0x%08x\n"
             "dst_kept_until_reboot=0x00000001\n"
             "first=%08x %08x %08x %08x %08x %08x %08x %08x\n"
             "last=%08x %08x %08x %08x %08x %08x %08x %08x\n",
-            width, height, raw_ptr, map_base, map_offset, bandwidth,
-            src_x, src_y, memif_handle, M6II_FRAME_RD_CH, M6II_LINEAR_WR_CH,
-            m6ii_frame_resources[0], m6ii_frame_resources[1],
-            M6II_TAP_LINES, line_bytes, requested_bytes,
-            (uint32_t)dst, (uint32_t)stage,
+            M6II_RAW_DST_CHANNEL, M6II_RAW_DST_MMIO, M6II_RAW_DST_RAM_ADDR_REG,
+            M6II_RAW_ADDR_PATCH, M6II_RAW_ADDR_CONTINUE,
+            width, height, M6II_RAW_FRAME_BYTES,
+            raw_state_ptr, engine_channel,
+            (uint32_t)dst, (uint32_t)m6ii_first_canon_addr, (uint32_t)m6ii_restore_canon_addr,
+            (uint32_t)m6ii_redirect_hits, (uint32_t)m6ii_redirect_phase,
+            (uint32_t)stage, (uint32_t)patch_ret, (uint32_t)unpatch_ret,
             (uint32_t)ret_mm, (uint32_t)ret_on, (uint32_t)ret_off,
-            lock_ret, unlock_ret, delete_ret,
-            elapsed_us, verify_us, changed_requested, checksum_requested,
+            changed, checksum, guard_bad,
             first_words[0], first_words[1], first_words[2], first_words[3],
             first_words[4], first_words[5], first_words[6], first_words[7],
             last_words[0], last_words[1], last_words[2], last_words[3],
@@ -215,29 +345,30 @@ cleanup:
         FIO_CloseFile(f);
     }
 
-    /* Keep the full-frame destination allocated until reboot, as in v6. */
-    m6ii_frame_tap_busy = 0;
-    if (stage == 7 && changed_requested != 0)
-        NotifyBox(5000, "FULL FRAME TAP DONE: 0x%08x us", elapsed_us);
+    /* Keep the first redirected buffer allocated until reboot. */
+    m6ii_redirect_busy = 0;
+
+    if (stage == 7 && changed != 0 && guard_bad == 0)
+        NotifyBox(6000, "RAW WRITER REDIRECT PASS: changed=0x%08x", changed);
     else
-        NotifyBox(5000, "FULL FRAME TAP result stage=0x%08x", (uint32_t)stage);
+        NotifyBox(6000, "RAW redirect result stage=0x%08x guard=0x%08x", (uint32_t)stage, guard_bad);
 }
 
-static struct menu_entry m6ii_frame_tap_menu[] = {
+static struct menu_entry m6ii_redirect_menu[] = {
     {
-        .name = "TEST RAW full-frame tap v7",
-        .priv = m6ii_frame_full_run,
+        .name = "TEST RAW writer redirect v8",
+        .priv = m6ii_raw_redirect_test,
         .select = run_in_separate_task,
-        .help = "2000-line Canon FrameToLinear/CopyEsub6 test using the v6-proven path."
+        .help = "Redirect exactly one native packed RAW frame from Canon EDMAC channel 0x4B into ML DMA RAM."
     },
 };
 
-static void m6ii_frame_tap_init()
+static void m6ii_redirect_init(void)
 {
-    menu_add("Debug", m6ii_frame_tap_menu, COUNT(m6ii_frame_tap_menu));
-    DryosDebugMsg(0, 15, "M6II FrameToLinear RAW v7: full-frame menu registered");
+    menu_add("Debug", m6ii_redirect_menu, COUNT(m6ii_redirect_menu));
+    DryosDebugMsg(0, 15, "M6II native RAW writer redirect v8 registered");
 }
 
-INIT_FUNC(__FILE__, m6ii_frame_tap_init);
+INIT_FUNC(__FILE__, m6ii_redirect_init);
 
 #endif /* !CONFIG_HELLO_WORLD */
