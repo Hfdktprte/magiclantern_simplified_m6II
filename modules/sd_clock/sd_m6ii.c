@@ -137,17 +137,9 @@ static uint32_t m6ii_boot_clock_after = 0xffffffff;
 static int m6ii_boot_live_195 = 0;
 static uint32_t m6ii_boot_div = 0xffffffff;
 
-static void m6ii_bilal_post_preset_hook(uint32_t *regs, uint32_t *stack, uint32_t pc)
+static void m6ii_bilal_post_preset_override(uint32_t dev, uint32_t selector)
 {
     m6ii_hook_calls++;
-
-    /*
-     * SetSDClkFrequency keeps device in r5 and selector in r4 across
-     * the preset-writer call.  M6II SD is device 0.
-     */
-    uint32_t dev = regs[5];
-    uint32_t selector = regs[4];
-
     m6ii_hook_last_dev = dev;
     m6ii_hook_last_selector = selector;
 
@@ -165,12 +157,52 @@ static void m6ii_bilal_post_preset_hook(uint32_t *regs, uint32_t *stack, uint32_
     }
 }
 
+/*
+ * D678X convert_f_patch_to_patch() replaces 8 bytes with an absolute jump;
+ * unlike the old D5 patch_hook_function(), it does not manufacture a
+ * callback frame.  Use the same proven pattern as the M6II RAW EDMAC hook:
+ * preserve Canon's registers, call our helper, replay the displaced
+ * instructions semantically, then resume after the 8-byte patch.
+ *
+ * Displaced E012BEA4..E012BEAB:
+ *   movs r1,#5
+ *   mov  r0,r5
+ *   bl   E043DC08
+ */
+static void __attribute__((noinline,naked,aligned(4)))
+m6ii_bilal_post_preset_trampoline(void)
+{
+    asm volatile(
+        "push {r0-r12, lr}\n"
+        "mov  r0, r5\n"
+        "mov  r1, r4\n"
+        "mov  r3, %0\n"
+        "blx  r3\n"
+        "pop  {r0-r12, lr}\n"
+
+        /* replay displaced instructions */
+        "movs r1, #5\n"
+        "mov  r0, r5\n"
+        "movw r3, #0xDC09\n"
+        "movt r3, #0xE043\n"
+        "blx  r3\n"
+
+        /* resume at E012BEAC */
+        "movw r3, #0xBEAD\n"
+        "movt r3, #0xE012\n"
+        "bx   r3\n"
+        :
+        : "r"(m6ii_bilal_post_preset_override)
+        : "r3"
+    );
+}
+
 static int m6ii_install_bilal_hook(void)
 {
     struct function_hook_patch def =
     {
         .patch_addr = M6II_SD_POST_PRESET_HOOK,
-        .target_function_addr = (uint32_t)m6ii_bilal_post_preset_hook,
+        .target_function_addr = (uint32_t)m6ii_bilal_post_preset_trampoline,
         .description = "sd_clock: M6II Bilal post-preset override",
     };
 
