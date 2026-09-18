@@ -2979,9 +2979,25 @@ static void raw_lv_enable()
     // Defaults to 0, SAP::HEAD
     //call("lv_set_raw_wp", 0);
 #endif
+#ifdef CONFIG_EDMAC_RAW_PATCH
+#if defined(CONFIG_M6II)
+    /*
+     * Install the M6II writer hook before enabling Canon's RAW path, and keep
+     * it installed for the rest of the boot.  Repeated patch/unpatch while
+     * Canon is changing LiveView/ImageController state can race firmware code
+     * executing edmac_set_size and has produced intermittent ERR70 asserts.
+     *
+     * The hook itself is inert unless m6ii_lowbit_pitch_active is set, so
+     * leaving it installed has no effect in normal 14-bit or while LV is off.
+     */
+    install_edmac_raw_patch();
+#endif
+#endif
     call("lv_save_raw", 1);
 #ifdef CONFIG_EDMAC_RAW_PATCH
+#if !defined(CONFIG_M6II)
     install_edmac_raw_patch();
+#endif
 #endif
 #endif
 
@@ -3030,7 +3046,9 @@ static void raw_lv_disable()
 #ifndef CONFIG_EDMAC_RAW_SLURP
     call("lv_save_raw", 0);
 #ifdef CONFIG_EDMAC_RAW_PATCH
+#if !defined(CONFIG_M6II)
     remove_edmac_raw_patch();
+#endif
 #endif
 #endif
 
