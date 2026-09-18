@@ -1698,22 +1698,43 @@ int FAST raw_get_pixel(int x, int y)
 
 int FAST raw_red_pixel(int x, int y)
 {
+    y = (y/2) * 2;
+    if (raw_info.bits_per_pixel == 14)
+    {
+        struct raw_pixblock * buf = (void*)raw_info.buffer;
+        int i = ((y * raw_info.width + x) / 8);
+        return buf[i].a;
+    }
+
     int bx = (x / 8) * 8;
-    y = (y / 2) * 2;
     return raw_get_pixel(bx, y);
 }
 
 int FAST raw_green_pixel(int x, int y)
 {
+    y = (y/2) * 2;
+    if (raw_info.bits_per_pixel == 14)
+    {
+        struct raw_pixblock * buf = (void*)raw_info.buffer;
+        int i = ((y * raw_info.width + x) / 8);
+        return buf[i].h;
+    }
+
     int bx = (x / 8) * 8;
-    y = (y / 2) * 2;
     return raw_get_pixel(bx + 7, y);
 }
 
 int FAST raw_blue_pixel(int x, int y)
 {
+    y = (y/2) * 2 - 1;
+    if (raw_info.bits_per_pixel == 14)
+    {
+        struct raw_pixblock * buf = (void*)raw_info.buffer;
+        int i = ((y * raw_info.width + x) / 8);
+        return buf[i].h;
+    }
+
     int bx = (x / 8) * 8;
-    y = (y / 2) * 2 - 1;
     return raw_get_pixel(bx + 7, y);
 }
 
@@ -1762,6 +1783,9 @@ int FAST raw_blue_pixel_bright(int x, int y)
 
 void FAST raw_set_pixel(int x, int y, int value)
 {
+    if (raw_info.bits_per_pixel != 14)
+        return;
+
     struct raw_pixblock * p = (void*)raw_info.buffer + y * raw_info.pitch + (x/8)*14;
     switch (x%8) {
         case 0: p->a = value; break;
