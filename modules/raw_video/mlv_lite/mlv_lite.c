@@ -4202,28 +4202,15 @@ unsigned int raw_rec_keypress_cbr(unsigned int key)
     /* ... or SET on 5D2/50D */
     if (cam_50d || cam_5d2) rec_key_pressed = (key == MODULE_KEY_PRESS_SET);
 
-    /*
-     * M6II bring-up: the native movie-record button event is not mapped in
-     * platform/M6II.111/gui.h yet.  Use the known SET event temporarily so
-     * we can validate the actual RAW recording pipeline independently.
-     */
-    if (is_camera("M6II", "1.1.1") && key == MODULE_KEY_PRESS_SET)
-        rec_key_pressed = 1;
-    
     if (rec_key_pressed)
     {
         printf("REC key pressed.\n");
 
         if (!compress_mq)
         {
-            /* not initialized; block the event, but make the failure visible */
-            if (is_camera("M6II", "1.1.1"))
-                NotifyBox(3000, "M6II RAW recorder not ready");
+            /* not initialized; block the event */
             return 0;
         }
-
-        if (is_camera("M6II", "1.1.1"))
-            NotifyBox(1000, "M6II RAW REC trigger");
 
         switch(raw_recording_state)
         {
