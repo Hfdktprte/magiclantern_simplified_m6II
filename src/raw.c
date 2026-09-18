@@ -2549,6 +2549,9 @@ static void m6ii_lowbit_write_runtime_log(int requested_bpp)
         detected_h,
         expected_detected_w);
 
+    FIO_WriteFile(f, line, len);
+    FIO_CloseFile(f);
+}
 
 /*
  * On M6II, changing the low-RAM PackMode field does not by itself rerun
