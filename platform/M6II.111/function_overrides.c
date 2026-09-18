@@ -140,7 +140,8 @@ void _engio_write(uint32_t* reg_list) { return; }
  * Canon SetSDClkFrequency() converges at E012BEA4 immediately after
  * E012BA6C writes the selected 11-word D01006xx preset.  The original
  * UHS porting method hooks immediately after Canon sets these registers
- * and replaces them with uhs_vals[].
+ * and replaces them with uhs_vals[].  This diagnostic revision only traces
+ * the preset sequence; it performs no register override.
  */
 #define M6II_SD_POST_PRESET_HOOK 0xE012BEA4u
 #define M6II_SD_DEVICE           0u
@@ -152,11 +153,10 @@ static const uint32_t m6ii_bilal_sd_regs[11] =
     0xD0100638u, 0xD0100604u, 0xD010060Cu,
 };
 
-static volatile uint32_t m6ii_bilal_sd_vals[11];
+#define M6II_BILAL_TRACE_MAX 8
 static volatile uint32_t m6ii_bilal_sd_calls = 0;
-static volatile uint32_t m6ii_bilal_sd_hits = 0;
-static volatile uint32_t m6ii_bilal_sd_last_dev = 0xffffffffu;
-static volatile uint32_t m6ii_bilal_sd_last_selector = 0xffffffffu;
+static volatile uint32_t m6ii_bilal_sd_trace[M6II_BILAL_TRACE_MAX];
+static volatile uint32_t m6ii_bilal_sd_div_trace[M6II_BILAL_TRACE_MAX];
 
 static struct patch m6ii_bilal_sd_patch[1];
 static uint8_t m6ii_bilal_sd_hook_code[8] __attribute__((aligned(4)));
@@ -171,33 +171,42 @@ void m6ii_bilal_sd_set_values(const uint32_t *vals)
 void m6ii_bilal_sd_reset_stats(void)
 {
     m6ii_bilal_sd_calls = 0;
-    m6ii_bilal_sd_hits = 0;
-    m6ii_bilal_sd_last_dev = 0xffffffffu;
-    m6ii_bilal_sd_last_selector = 0xffffffffu;
+    for (int i = 0; i < M6II_BILAL_TRACE_MAX; i++)
+    {
+        m6ii_bilal_sd_trace[i] = 0xffffffffu;
+        m6ii_bilal_sd_div_trace[i] = 0xffffffffu;
+    }
 }
 
-void m6ii_bilal_sd_get_stats(uint32_t *calls, uint32_t *hits,
-                             uint32_t *last_dev, uint32_t *last_selector)
+void m6ii_bilal_sd_get_trace(uint32_t *calls, uint32_t *trace,
+                             uint32_t *div_trace, uint32_t max_entries)
 {
     if (calls) *calls = m6ii_bilal_sd_calls;
-    if (hits) *hits = m6ii_bilal_sd_hits;
-    if (last_dev) *last_dev = m6ii_bilal_sd_last_dev;
-    if (last_selector) *last_selector = m6ii_bilal_sd_last_selector;
+
+    uint32_t n = max_entries;
+    if (n > M6II_BILAL_TRACE_MAX) n = M6II_BILAL_TRACE_MAX;
+
+    for (uint32_t i = 0; i < n; i++)
+    {
+        if (trace) trace[i] = m6ii_bilal_sd_trace[i];
+        if (div_trace) div_trace[i] = m6ii_bilal_sd_div_trace[i];
+    }
 }
 
 static void m6ii_bilal_sd_override(uint32_t dev, uint32_t selector)
 {
-    m6ii_bilal_sd_calls++;
-    m6ii_bilal_sd_last_dev = dev;
-    m6ii_bilal_sd_last_selector = selector;
+    uint32_t i = m6ii_bilal_sd_calls++;
 
-    if (dev == M6II_SD_DEVICE && selector == 9u)
+    if (i < M6II_BILAL_TRACE_MAX)
     {
-        for (int i = 0; i < 11; i++)
-            MEM(m6ii_bilal_sd_regs[i]) = m6ii_bilal_sd_vals[i];
-
-        m6ii_bilal_sd_hits++;
+        m6ii_bilal_sd_trace[i] = ((dev & 0xffffu) << 16) | (selector & 0xffffu);
+        m6ii_bilal_sd_div_trace[i] = MEM(0xD0100604u);
     }
+
+    /*
+     * Trace-only build: do not change Canon's controller state.
+     * This is mapping the D8 equivalent of Bilal's setup-mode stage.
+     */
 }
 
 static void __attribute__((noinline,naked,aligned(4)))
