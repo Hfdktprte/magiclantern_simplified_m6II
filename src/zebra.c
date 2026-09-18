@@ -804,7 +804,12 @@ static void FAST draw_zebras_raw_lv()
 {
     if (!raw_update_params()) return;
 
+#ifdef FEATURE_VRAM_RGBA
+    /* D8 compositor: indexed ML buffer is converted to the RGBA layer later. */
+    uint8_t * const bvram = bmp_vram();
+#else
     uint8_t * const bvram = bmp_vram_real();
+#endif
     if (!bvram) return;
     uint8_t * const bvram_mirror = get_bvram_mirror();
     if (!bvram_mirror) return;
@@ -855,6 +860,10 @@ static void FAST draw_zebras_raw_lv()
             #undef MP
         }
     }
+
+#ifdef FEATURE_VRAM_RGBA
+    ml_refresh_display_needed = 1;
+#endif
 }
 
 static MENU_UPDATE_FUNC(raw_zebra_update)
@@ -3644,10 +3653,10 @@ static int raw_zebra_killgd_should_run()
     if (!lv || gui_menu_shown() || !DISPLAY_IS_ON || !bmp_is_on() || LV_PAUSED)
         return 0;
 
-    if (!zebra_draw || !RAW_ZEBRA_ENABLE || !(zebra_rec || NOT_RECORDING))
+    if (!zebra_draw || !zebra_rec)
         return 0;
 
-    /* Keeps the existing 14-bit safety check until low-bit sampling is ported. */
+    /* M6II can_use_raw_overlays() now validates 10/12/14-bit packed RAW. */
     return can_use_raw_overlays();
 }
 #endif
@@ -4109,7 +4118,10 @@ livev_hipriority_task( void* unused )
         if (!zebra_should_run() && raw_zebra_killgd_should_run())
         {
             digic_zebra_cleanup();
-            BMP_LOCK( draw_zebras_raw_lv(); )
+            BMP_LOCK(
+                draw_zebras_raw_lv();
+                ml_refresh_display_needed = 1;
+            )
             msleep(50);
             continue;
         }
