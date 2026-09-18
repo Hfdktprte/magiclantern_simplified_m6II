@@ -6,6 +6,10 @@
 
 int compositor_layer_setup();
 
+/* D8/XCM: show or hide Canon overlay layers while leaving ML's dedicated
+ * compositor layer enabled. Returns nonzero when supported/applied. */
+int compositor_set_canon_layers_visible(int visible);
+
 /**
  * Really D8, DX -> 6, D7 -> 8, D6 -> either 7 or 8 depending on Zico fw.
  *
