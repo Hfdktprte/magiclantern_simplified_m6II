@@ -186,10 +186,13 @@ static MENU_UPDATE_FUNC(m6ii_preview_update)
         return;
     }
 
-    if (raw_lv_is_enabled() && raw_info.bits_per_pixel != 14)
+    if (raw_lv_is_enabled() &&
+        raw_info.bits_per_pixel != 14 &&
+        raw_info.bits_per_pixel != 12 &&
+        raw_info.bits_per_pixel != 10)
     {
-        MENU_SET_WARNING(MENU_WARN_INFO,
-            "RAW framing preview is currently 14-bit only; recording is unchanged.");
+        MENU_SET_WARNING(MENU_WARN_NOT_WORKING,
+            "Unsupported RAW bit depth for framing preview.");
     }
 }
 
