@@ -11,6 +11,7 @@
 #include <raw.h>
 #include <fps.h>
 #include <shoot.h>
+#include <compositor.h>
 
 #undef CROP_DEBUG
 
@@ -30,10 +31,13 @@ static CONFIG_INT("crop.preset", crop_preset_index, 0);
 static CONFIG_INT("crop.shutter_range", shutter_range, 0);
 static CONFIG_INT("crop.m6ii.raw_preview", m6ii_raw_preview, 1);
 
-extern WEAK_FUNC(ret_0) int mlv_lite_render_recording_preview(int quality);
+extern WEAK_FUNC(ret_0) int mlv_lite_render_recording_preview_bmp(void);
+extern WEAK_FUNC(ret_0) int mlv_lite_raw_zebra_exception_active(void);
 
 static struct semaphore *m6ii_preview_sem = NULL;
 static volatile int m6ii_preview_pending = 0;
+static int m6ii_preview_visible = 0;
+static int m6ii_canon_layers_hidden = 0;
 
 enum crop_preset {
     CROP_PRESET_OFF = 0,
@@ -141,6 +145,31 @@ static uint32_t ENGIO_WRITE     = 0;
 static uint32_t MEM_ENGIO_WRITE = 0;
 
 /* M6II preview-only port: no CMOS/ADTG/ENGIO hooks. */
+static void m6ii_preview_clear_layer(void)
+{
+    uint8_t *bvram = bmp_vram();
+    uint8_t *mirror = get_bvram_mirror();
+
+    BMP_LOCK(
+        if (bvram)
+            bzero32(bvram - BMP_HDMI_OFFSET, BMP_VRAM_SIZE);
+        if (mirror)
+            bzero32(mirror - BMP_HDMI_OFFSET, BMP_VRAM_SIZE);
+    )
+
+    ml_refresh_display_needed = 1;
+    m6ii_preview_visible = 0;
+}
+
+static void m6ii_restore_canon_layers(void)
+{
+    if (m6ii_canon_layers_hidden)
+    {
+        compositor_set_canon_layers_visible(1);
+        m6ii_canon_layers_hidden = 0;
+    }
+}
+
 static void m6ii_preview_task(void *unused)
 {
     while (1)
@@ -148,27 +177,52 @@ static void m6ii_preview_task(void *unused)
         take_semaphore(m6ii_preview_sem, 0);
         m6ii_preview_pending = 0;
 
-        if (!is_M6II || !m6ii_raw_preview || !lv || gui_menu_shown())
+        if (!is_M6II)
             continue;
 
-        /*
-         * Core RAW preview is still 14-bit-only.  The weak mlv_lite helper
-         * keeps the exact recorder rectangle and settings semaphore in one
-         * place; it simply returns 0 for 10/12-bit until low-bit sampling is
-         * validated.
-         */
-        mlv_lite_render_recording_preview(RAW_PREVIEW_COLOR_HALFRES);
+        int menu = gui_menu_shown();
+        int killgd = mlv_lite_raw_zebra_exception_active();
+        int want_preview = m6ii_raw_preview && lv && !menu;
+        int want_clean_canon = lv && !menu && (want_preview || killgd);
 
-        /* coalesce VSYNCs and leave CPU/write bandwidth to the recorder */
+        if (want_clean_canon)
+        {
+            /*
+             * Reassert this while active: Canon may refresh its own XCM layer
+             * state. ML's dedicated layer is not touched.
+             */
+            if (compositor_set_canon_layers_visible(0))
+                m6ii_canon_layers_hidden = 1;
+        }
+        else
+        {
+            m6ii_restore_canon_layers();
+        }
+
+        if (want_preview)
+        {
+            if (mlv_lite_render_recording_preview_bmp())
+                m6ii_preview_visible = 1;
+        }
+        else if (!menu && m6ii_preview_visible)
+        {
+            m6ii_preview_clear_layer();
+        }
+
+        /* preview is intentionally capped near the RGBA compositor's 20 fps */
         msleep(40);
     }
 }
 
 static unsigned int FAST m6ii_preview_vsync_cbr(unsigned int unused)
 {
-    if (!is_M6II || !m6ii_raw_preview || !lv || gui_menu_shown())
+    if (!is_M6II || !lv)
         return CBR_RET_CONTINUE;
 
+    /*
+     * Signal even when preview is OFF/menu is shown so the worker can restore
+     * Canon layers and clear a previous opaque RAW preview cleanly.
+     */
     if (m6ii_preview_sem && !m6ii_preview_pending)
     {
         m6ii_preview_pending = 1;
@@ -180,14 +234,19 @@ static unsigned int FAST m6ii_preview_vsync_cbr(unsigned int unused)
 
 static MENU_UPDATE_FUNC(m6ii_preview_update)
 {
-    if ((thunk)mlv_lite_render_recording_preview == (thunk)ret_0)
+    if ((thunk)mlv_lite_render_recording_preview_bmp == (thunk)ret_0)
     {
         MENU_SET_WARNING(MENU_WARN_NOT_WORKING, "Load mlv_lite for RAW framing preview.");
         return;
     }
 
-    if (raw_lv_is_enabled() &&
-        raw_info.bits_per_pixel != 14 &&
+    if (!raw_lv_is_enabled())
+    {
+        MENU_SET_WARNING(MENU_WARN_ADVICE, "Enable RAW video first.");
+        return;
+    }
+
+    if (raw_info.bits_per_pixel != 14 &&
         raw_info.bits_per_pixel != 12 &&
         raw_info.bits_per_pixel != 10)
     {
@@ -205,7 +264,7 @@ static struct menu_entry m6ii_crop_rec_menu[] = {
         .update = m6ii_preview_update,
         .depends_on = DEP_LIVEVIEW | DEP_MOVIE_MODE,
         .help = "Preview the exact RAW rectangle selected by MLV Lite.",
-        .help2 = "Uses RAW pixels and MLV Lite's skip/resolution geometry; no legacy sensor hooks.",
+        .help2 = "Uses ML's dedicated compositor layer and exact MLV crop geometry. Canon overlay layers are hidden while active.",
     },
 };
 
@@ -2131,6 +2190,12 @@ static unsigned int crop_rec_init()
 
 static unsigned int crop_rec_deinit()
 {
+    if (is_M6II)
+    {
+        m6ii_restore_canon_layers();
+        if (m6ii_preview_visible)
+            m6ii_preview_clear_layer();
+    }
     return 0;
 }
 
