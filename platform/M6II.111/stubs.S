@@ -180,6 +180,8 @@ THUMB_FN(0xe0580e5a, edmac_set_transfer_mode)
 /** M6II SD/UHS (verified from ROM0 1.1.1) **/
 /* Canon storage query used by DebugSTG_GetUHS2CardCapability. */
 THUMB_FN(0xe057d584, M6II_GetUHS2CardCapability)
+/* Canon's mounted-card UHS-II query; DebugSTG_CheckUHS2Mode calls this with 'B'. */
+THUMB_FN(0xe057d62a, M6II_IsUhs2Mode)
 
 /** Uncategorized **/
 DATA_PTR(0x14684, sd_device)
