@@ -183,8 +183,7 @@ THUMB_FN(0xe057d584, M6II_GetUHS2CardCapability)
 /* Canon's mounted-card UHS-II query; DebugSTG_CheckUHS2Mode calls this with 'B'. */
 THUMB_FN(0xe057d62a, M6II_IsUhs2Mode)
 
-/* Canon UHS-I driver calls, verified from M6II 1.1.1 ROM. */
-THUMB_FN(0xe017879c, M6II_SdChangeClockSpeed)
+/* Canon UHS-I readback used while porting Bilal's sd_uhs mechanism. */
 THUMB_FN(0xe0179f06, M6II_SdCARDGetSpeed)
 
 /** Uncategorized **/
