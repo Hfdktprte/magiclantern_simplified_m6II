@@ -24,9 +24,17 @@ static int is_5D3 = 0;
 static int is_6D = 0;
 static int is_EOSM = 0;
 static int is_basic = 0;
+static int is_M6II = 0;
 
 static CONFIG_INT("crop.preset", crop_preset_index, 0);
 static CONFIG_INT("crop.shutter_range", shutter_range, 0);
+static CONFIG_INT("crop.m6ii.raw_preview", m6ii_raw_preview, 1);
+
+static int (*mlv_lite_render_recording_preview)(int quality) =
+    MODULE_FUNCTION(mlv_lite_render_recording_preview);
+
+static struct semaphore *m6ii_preview_sem = NULL;
+static volatile int m6ii_preview_pending = 0;
 
 enum crop_preset {
     CROP_PRESET_OFF = 0,
@@ -132,6 +140,72 @@ static uint32_t ADTG_WRITE      = 0;
 static uint32_t MEM_ADTG_WRITE  = 0;
 static uint32_t ENGIO_WRITE     = 0;
 static uint32_t MEM_ENGIO_WRITE = 0;
+
+/* M6II preview-only port: no CMOS/ADTG/ENGIO hooks. */
+static void m6ii_preview_task(void *unused)
+{
+    while (1)
+    {
+        take_semaphore(m6ii_preview_sem, 0);
+        m6ii_preview_pending = 0;
+
+        if (!is_M6II || !m6ii_raw_preview || !lv || gui_menu_shown())
+            continue;
+
+        /*
+         * Core RAW preview is still 14-bit-only.  The weak mlv_lite helper
+         * keeps the exact recorder rectangle and settings semaphore in one
+         * place; it simply returns 0 for 10/12-bit until low-bit sampling is
+         * validated.
+         */
+        mlv_lite_render_recording_preview(RAW_PREVIEW_COLOR_HALFRES);
+
+        /* coalesce VSYNCs and leave CPU/write bandwidth to the recorder */
+        msleep(40);
+    }
+}
+
+static unsigned int FAST m6ii_preview_vsync_cbr(unsigned int unused)
+{
+    if (!is_M6II || !m6ii_raw_preview || !lv || gui_menu_shown())
+        return CBR_RET_CONTINUE;
+
+    if (m6ii_preview_sem && !m6ii_preview_pending)
+    {
+        m6ii_preview_pending = 1;
+        give_semaphore(m6ii_preview_sem);
+    }
+
+    return CBR_RET_CONTINUE;
+}
+
+static MENU_UPDATE_FUNC(m6ii_preview_update)
+{
+    if ((thunk)mlv_lite_render_recording_preview == (thunk)ret_0)
+    {
+        MENU_SET_WARNING(MENU_WARN_NOT_WORKING, "Load mlv_lite for RAW framing preview.");
+        return;
+    }
+
+    if (raw_lv_is_enabled() && raw_info.bits_per_pixel != 14)
+    {
+        MENU_SET_WARNING(MENU_WARN_INFO,
+            "RAW framing preview is currently 14-bit only; recording is unchanged.");
+    }
+}
+
+static struct menu_entry m6ii_crop_rec_menu[] = {
+    {
+        .name = "Crop RAW preview",
+        .priv = &m6ii_raw_preview,
+        .max = 1,
+        .choices = CHOICES("OFF", "RAW framing"),
+        .update = m6ii_preview_update,
+        .depends_on = DEP_LIVEVIEW | DEP_MOVIE_MODE,
+        .help = "Preview the exact RAW rectangle selected by MLV Lite.",
+        .help2 = "Uses RAW pixels and MLV Lite's skip/resolution geometry; no legacy sensor hooks.",
+    },
+};
 
 /* video modes */
 /* note: zoom mode is identified by checking registers directly */
@@ -1452,12 +1526,14 @@ static void update_patch()
 /* otherwise you will end up with a halfway configured video mode that looks weird */
 PROP_HANDLER(PROP_LV_ACTION)
 {
+    if (is_M6II) return;
     update_patch();
 }
 
 /* also try when switching zoom modes */
 PROP_HANDLER(PROP_LV_DISPSIZE)
 {
+    if (is_M6II) return;
     update_patch();
 }
 
@@ -1706,6 +1782,9 @@ static void set_zoom(int zoom)
 /* when closing ML menu, check whether we need to refresh the LiveView */
 static unsigned int crop_rec_polling_cbr(unsigned int unused)
 {
+    if (is_M6II)
+        return CBR_RET_CONTINUE;
+
     /* also check at startup */
     static int lv_dirty = 1;
 
@@ -1865,6 +1944,9 @@ static struct lvinfo_item info_items[] = {
 
 static unsigned int raw_info_update_cbr(unsigned int unused)
 {
+    if (is_M6II)
+        return 0;
+
     if (patch_active)
     {
         /* not implemented yet */
@@ -1938,6 +2020,26 @@ static unsigned int raw_info_update_cbr(unsigned int unused)
 
 static unsigned int crop_rec_init()
 {
+    if (is_camera("M6II", "1.1.1"))
+    {
+        is_M6II = 1;
+
+        m6ii_preview_sem =
+            create_named_semaphore("crop_m6ii_preview", SEM_CREATE_LOCKED);
+
+        if (!m6ii_preview_sem)
+        {
+            m6ii_raw_preview = 0;
+            return 1;
+        }
+
+        task_create("crop_m6ii_preview", 0x18, 0x1800,
+                    m6ii_preview_task, NULL);
+
+        menu_add("Movie", m6ii_crop_rec_menu, COUNT(m6ii_crop_rec_menu));
+        return 0;
+    }
+
     if (is_camera("5D3",  "1.1.3") || is_camera("5D3", "1.2.3"))
     {
         /* same addresses on both 1.1.3 and 1.2.3 */
@@ -2038,9 +2140,11 @@ MODULE_INFO_END()
 MODULE_CONFIGS_START()
     MODULE_CONFIG(crop_preset_index)
     MODULE_CONFIG(shutter_range)
+    MODULE_CONFIG(m6ii_raw_preview)
 MODULE_CONFIGS_END()
 
 MODULE_CBRS_START()
+    MODULE_CBR(CBR_VSYNC, m6ii_preview_vsync_cbr, 0)
     MODULE_CBR(CBR_SHOOT_TASK, crop_rec_polling_cbr, 0)
     MODULE_CBR(CBR_RAW_INFO_UPDATE, raw_info_update_cbr, 0)
 MODULE_CBRS_END()
