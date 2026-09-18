@@ -2259,6 +2259,13 @@ void FAST raw_lv_redirect_edmac(void* ptr)
     #ifdef CONFIG_EDMAC_RAW_SLURP
     redirected_raw_buffer = (void*) CACHEABLE(ptr);
     #else
+    #if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    /*
+     * Canon may rewrite 10-bit xb behind edmac_set_size.  Reassert the
+     * low-bit pitch immediately before redirecting the next RAW frame.
+     */
+    (void)m6ii_raw_force_live_pitch();
+    #endif
     raw_lv_edmac->ram_addr = (uint32_t)CACHEABLE(ptr);
     #endif
 }
@@ -2350,6 +2357,7 @@ static volatile uint32_t m6ii_edmac_raw_last_xb_in = 0;
 static volatile uint32_t m6ii_edmac_raw_last_xb_out = 0;
 static volatile uint32_t m6ii_edmac_raw_last_yb = 0;
 static volatile uint32_t m6ii_edmac_raw_last_bpp = 0;
+static volatile uint32_t m6ii_edmac_raw_forced_pitch_writes = 0;
 
 #define M6II_D8_CHANNEL_COUNT           76u
 #define M6II_PACKUNPACK_ID_BASE         0xE1008814u
@@ -2479,6 +2487,45 @@ static void m6ii_lowbit_reset_hook_probe(void)
     m6ii_edmac_raw_last_xb_out = 0;
     m6ii_edmac_raw_last_yb = 0;
     m6ii_edmac_raw_last_bpp = 0;
+    m6ii_edmac_raw_forced_pitch_writes = 0;
+}
+
+/*
+ * M6II 10-bit has one extra quirk compared with Bilal's M50:
+ * Canon can restore channel-3 yb_xb to its 14-bit value without calling
+ * edmac_set_size again.  12-bit does not show this behavior.
+ *
+ * Keep this narrowly scoped to the already-validated RAW channel and only
+ * while low-bit RAW is active.  Preserve Canon's live yb (height) and update
+ * xb (pitch) only.
+ */
+static int m6ii_raw_force_live_pitch(void)
+{
+    if (!m6ii_edmac_raw_patch_installed ||
+        raw_info.bits_per_pixel >= 14 ||
+        raw_info.width <= 0)
+    {
+        return 1;
+    }
+
+    uint32_t expected_pitch =
+        raw_info.width * raw_info.bits_per_pixel / 8u;
+
+    uint32_t yb_xb = raw_lv_edmac->yb_xb;
+    uint32_t actual_pitch = yb_xb & 0xFFFFu;
+
+    if (actual_pitch != expected_pitch)
+    {
+        raw_lv_edmac->yb_xb =
+            (yb_xb & 0xFFFF0000u) | (expected_pitch & 0xFFFFu);
+        m6ii_edmac_raw_forced_pitch_writes++;
+
+        /* read back the MMIO write before trusting it */
+        if ((raw_lv_edmac->yb_xb & 0xFFFFu) != expected_pitch)
+            return 0;
+    }
+
+    return 1;
 }
 
 static void m6ii_lowbit_write_runtime_log(int requested_bpp)
@@ -2518,6 +2565,7 @@ static void m6ii_lowbit_write_runtime_log(int requested_bpp)
         "hook_last_xb_in=%d (0x%x)\n"
         "hook_last_xb_out=%d (0x%x)\n"
         "hook_last_yb=%d (0x%x)\n"
+        "forced_pitch_writes=%d\n"
         "raw_edmac_yb_xb=%08x\n"
         "raw_edmac_yn_xn=%08x\n"
         "actual_pitch=%d (0x%x)\n"
@@ -2540,6 +2588,7 @@ static void m6ii_lowbit_write_runtime_log(int requested_bpp)
         m6ii_edmac_raw_last_xb_in, m6ii_edmac_raw_last_xb_in,
         m6ii_edmac_raw_last_xb_out, m6ii_edmac_raw_last_xb_out,
         m6ii_edmac_raw_last_yb, m6ii_edmac_raw_last_yb,
+        m6ii_edmac_raw_forced_pitch_writes,
         yb_xb,
         yn_xn,
         actual_pitch, actual_pitch,
@@ -2623,6 +2672,24 @@ static int m6ii_raw_apply_writer_pitch(int bpp, uint32_t expected_mode)
 
     uint32_t yb_xb_after = shamem_read(base + 0x50u);
     uint32_t actual_pitch_after = yb_xb_after & 0xFFFFu;
+
+    /*
+     * 10-bit on M6II may be restored to 14-bit by a Canon path that bypasses
+     * edmac_set_size.  Repair xb directly on the validated RAW MMIO channel.
+     * The same helper is also called at frame-validation/redirection time so
+     * a later Canon rewrite cannot make mlv_lite stop on the first frame.
+     */
+    if (actual_pitch_after != expected_pitch && bpp < 14)
+    {
+        if (!m6ii_raw_force_live_pitch())
+        {
+            m6ii_lowbit_set_error("RAW direct pitch write failed");
+            return 0;
+        }
+
+        yb_xb_after = shamem_read(base + 0x50u);
+        actual_pitch_after = yb_xb_after & 0xFFFFu;
+    }
 
     if (m6ii_edmac_raw_hook_calls == calls_before)
     {
@@ -2765,6 +2832,13 @@ int raw_lv_settings_still_valid()
 {
     /* should be fast enough for vsync calls */
     if (!lv_raw_enabled) return 0;
+#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    /*
+     * Repair M6II's 10-bit Canon rewrite before deriving width from yb_xb.
+     * If the write itself fails, treat settings as invalid.
+     */
+    if (!m6ii_raw_force_live_pitch()) return 0;
+#endif
     int w, h;
     if (!raw_lv_get_resolution(&w, &h)) return 0;
 #if defined(CONFIG_M6II)
