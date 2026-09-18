@@ -2252,19 +2252,51 @@ static uint32_t m6ii_raw_packmode_addr(void)
     /* Sanity-check the known RAW writer before following its PackUnpack ID. */
     uint32_t raw_mmio = MEM(M6II_DMACINFO_BASE + M6II_RAW_EDMAC_CHANNEL * 8u);
     if (raw_mmio != RAW_LV_EDMAC_CHANNEL_ADDR)
+    {
+        m6ii_lowbit_set_error("DmacInfo[3]=%08x expected %08x",
+                              raw_mmio, RAW_LV_EDMAC_CHANNEL_ADDR);
         return 0;
+    }
 
-    uint32_t puid = MEM(M6II_PACKUNPACK_ID_BASE + M6II_RAW_EDMAC_CHANNEL * 4u);
+    uint32_t puid_addr = M6II_PACKUNPACK_ID_BASE + M6II_RAW_EDMAC_CHANNEL * 4u;
+    uint32_t puid = MEM(puid_addr);
     if (puid >= M6II_D8_CHANNEL_COUNT)
+    {
+        m6ii_lowbit_set_error("PUID=%08x @ %08x", puid, puid_addr);
         return 0;
+    }
 
     /*
      * DIGIC 8 PackUnpackInfo entries are 3 words:
      *   [0] PackMode field pointer, [1] unknown, [2] mode flags.
      */
-    uint32_t packmode = MEM(M6II_PACKUNPACK_INFO_BASE + puid * 12u);
-    if ((packmode & 3u) || packmode < 0x1000u || packmode >= 0x01000000u)
+    uint32_t pui_addr = M6II_PACKUNPACK_INFO_BASE + puid * 12u;
+    uint32_t packmode = MEM(pui_addr);
+    if (packmode & 3u)
+    {
+        m6ii_lowbit_set_error("Pack ptr unaligned %08x; PUID=%u PUI=%08x",
+                              packmode, puid, pui_addr);
         return 0;
+    }
+
+    /*
+     * M50's PackMode is low RAM (0x127B4), but do not assume the newer M6II
+     * uses the same RAM range.  Report a plausible-but-outside-old-range
+     * pointer instead of silently collapsing it into "unresolved".
+     */
+    if (packmode < 0x1000u)
+    {
+        m6ii_lowbit_set_error("Pack ptr too low %08x; PUID=%u PUI=%08x",
+                              packmode, puid, pui_addr);
+        return 0;
+    }
+
+    if (packmode >= 0x01000000u)
+    {
+        m6ii_lowbit_set_error("Pack ptr high %08x; PUID=%u PUI=%08x",
+                              packmode, puid, pui_addr);
+        return 0;
+    }
 
     /*
      * Do not require the PackMode RAM value to be initialized here.
@@ -2915,7 +2947,7 @@ void raw_lv_request_bpp(int bpp)
          */
         if (!PACK32_MODE)
         {
-            if (bpp < 14)
+            if (bpp < 14 && !m6ii_lowbit_error[0])
                 m6ii_lowbit_set_error("PackMode pointer unresolved");
             give_semaphore(raw_sem);
             return;
