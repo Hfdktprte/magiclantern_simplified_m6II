@@ -1320,25 +1320,29 @@ int raw_update_params_work()
     raw_info.white_level = get_default_white_level();
     ASSERT(raw_info.bits_per_pixel == 14);
     int black_mean = 0, black_stdev_x100 = 0;
-    int ok = autodetect_black_level(&black_mean, &black_stdev_x100);
+    int ok = 0;
 
     #ifdef CONFIG_M6II
     /*
-     * M6II bring-up fallback:
-     * do not let an uncalibrated optical-black crop keep RAW video at 0x0.
-     * Geometry/buffer are already runtime-proven from the native RAW writer.
-     * If the generic black-bar detector rejects our provisional border,
-     * use conservative metadata values and continue.  This affects metadata/
-     * preview calculations only; it does not alter or synthesize RAW pixels.
+     * M6II movie RAW uses a fixed 14-bit black reference of 2048 for both
+     * Canon 4K and Full-HD sensor readout.  mlv_lite scales this metadata
+     * exactly to 512 in 12-bit and 128 in 10-bit.
+     *
+     * Do not let the provisional M50-derived optical-black crop make the
+     * metadata vary when Canon switches between 4K and Full-HD streams.
+     * Photo/raw-still paths keep using the generic detector below.
      */
-    if (!ok && lv && is_movie_mode())
+    if (lv && is_movie_mode())
     {
         black_mean = 2048;
-        black_stdev_x100 = 800; /* 8 DN placeholder; refine from real MLV */
+        black_stdev_x100 = 800;
         ok = 1;
-        printf("M6II: provisional black-level fallback\n");
     }
+    else
     #endif
+    {
+        ok = autodetect_black_level(&black_mean, &black_stdev_x100);
+    }
 
     #ifdef BLACK_LEVEL
     if (ABS(black_mean - BLACK_LEVEL) < 64)
