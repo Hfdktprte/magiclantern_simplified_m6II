@@ -295,29 +295,39 @@ static void m6ii_raw_edmac_census(void)
     }
 
     m6ii_census_busy = 1;
+    NotifyBox(1500, "EDMAC census START");
+    DryosDebugMsg(0, 15, "M6II census: stage 1 start");
 
     load_channel_table();
 
     /* Establish a known RAW-off baseline before touching any EDMAC MMIO. */
     int ret_preoff = call("lv_save_raw", 0);
     msleep(M6II_RAW_SETTLE_MS);
+    NotifyBox(1000, "Census: baseline");
+    DryosDebugMsg(0, 15, "M6II census: stage 2 baseline");
 
     /* Wake every D8 EDMAC domain once and keep that reference until RAW has
      * been turned off again.  This is the important anti-hard-lock step.
      */
     PwrMng_WakeSubChips(all_edmac_subchips);
+    NotifyBox(1000, "Census: EDMAC awake");
+    DryosDebugMsg(0, 15, "M6II census: stage 3 awake");
 
     snapshot_off();
 
     int ret_mm = call("lv_set_mm", 1);
     int ret_on = call("lv_save_raw", 1);
     msleep(M6II_RAW_SETTLE_MS);
+    NotifyBox(1000, "Census: RAW on");
+    DryosDebugMsg(0, 15, "M6II census: stage 4 raw on");
 
     uint32_t state_w   = read32(M6II_RAW_STATE_BASE + 0x10u);
     uint32_t state_h   = read32(M6II_RAW_STATE_BASE + 0x14u);
     uint32_t state_buf = read32(M6II_RAW_STATE_BASE + 0x58u);
 
     poll_raw_on();
+    NotifyBox(1000, "Census: poll done");
+    DryosDebugMsg(0, 15, "M6II census: stage 5 poll done");
 
     int ret_off = call("lv_save_raw", 0);
     msleep(M6II_RAW_SETTLE_MS);
