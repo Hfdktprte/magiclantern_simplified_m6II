@@ -3161,20 +3161,6 @@ void raw_lv_request_bpp(int bpp)
      */
     m6ii_lowbit_pitch_active = 0;
 
-    /*
-     * MLV redirects channel 3 to its recording buffers on every captured
-     * frame.  When recording stops, the channel may still point at the last
-     * MLV buffer.  Restore Canon's persistent RAW buffer *before* the recorder
-     * frees those buffers or changes PackMode/pitch.  Canon keeps its normal
-     * destination at RAW state + 0x58; this address was independently
-     * validated against the live channel-3 writer on M6II.
-     */
-    if (bpp >= 14 && lv_raw_enabled && lv)
-    {
-        uint32_t canon_raw_buffer = MEM(M6II_RAW_STATE_BASE + 0x58u);
-        if (canon_raw_buffer)
-            raw_lv_edmac->ram_addr = (uint32_t)CACHEABLE(canon_raw_buffer);
-    }
 #endif
 
     /* raw bit depth setup is done from PACK32_MODE register (mask 0x131) */
