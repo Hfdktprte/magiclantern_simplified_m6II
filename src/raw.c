@@ -139,10 +139,20 @@ static void m6ii_lowbit_dump_roms(void)
      * E1008700 spans PackUnpack/DmacInfo-related static tables around
      * the proven DmacInfo base E1008944.
      */
-    m6ii_lowbit_dump_region("M6II_E058.BIN",    0xE0580000u, 0x1200u);
-    m6ii_lowbit_dump_region("M6II_TABLES.BIN",  0xE1008700u, 0x1200u);
-    m6ii_lowbit_dump_region("M6II_D5B.BIN",     0x000D5800u, 0x2000u);
-    m6ii_lowbit_dump_region("M6II_EDMAC_RAM.BIN",0x0007D000u,0x1000u);
+    m6ii_lowbit_dump_region("M6II_E058.BIN",     0xE0580000u, 0x1200u);
+    m6ii_lowbit_dump_region("M6II_TABLES.BIN",   0xE1008700u, 0x1200u);
+    m6ii_lowbit_dump_region("M6II_D5B.BIN",      0x000D5800u, 0x2000u);
+    m6ii_lowbit_dump_region("M6II_EDMAC_RAM.BIN",0x0007D000u, 0x1000u);
+
+    /*
+     * M6II RAW-LV implementation previously identified from runtime code:
+     * helpers around 0x02285A6E read state[0x10/0x14], state+0x58 buffer,
+     * lv_save_raw stores state+0x40, and lv_set_mm stores state+0x44.
+     * Dump the surrounding caller plus the complete local state block so the
+     * live bit-depth selector can be traced from camera-native code.
+     */
+    m6ii_lowbit_dump_region("M6II_RAWCODE.BIN",  0x02284000u, 0x4000u);
+    m6ii_lowbit_dump_region("M6II_RAWSTATE.BIN", 0x00010900u, 0x0200u);
 }
 #else
 const char * raw_lv_bpp_error_string(void)
