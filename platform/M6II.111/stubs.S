@@ -153,11 +153,11 @@ THUMB_FN(0xe0586a00, CreateMemorySuite)
 THUMB_FN(0xe0586046, CreateMemoryChunk)
 
 /** DIGIC 8 engine power/resource management (M6II ROM-mapped) **/
-THUMB_FN(0xe0670eb6, PwrMng_WakeSubChips)
-THUMB_FN(0xe0670ee4, PwrMng_SuspendSubChips)
-THUMB_FN(0xe05b978a, CreateResLockEntry)
-THUMB_FN(0xe05b9972, LockEngineResources)
-THUMB_FN(0xe05b9a0c, UnLockEngineResources)
+THUMB_FN(0xe0630eb6, PwrMng_WakeSubChips)
+THUMB_FN(0xe0630ee4, PwrMng_SuspendSubChips)
+THUMB_FN(0xe057978a, CreateResLockEntry)
+THUMB_FN(0xe0579972, LockEngineResources)
+THUMB_FN(0xe0579a0c, UnLockEngineResources)
 
 /** DIGIC 8 EDMAC API (M6II ROM-mapped)
  * ROM0.BIN is based at 0xE0000000.  Do not add the old +0x40000 shift here.
