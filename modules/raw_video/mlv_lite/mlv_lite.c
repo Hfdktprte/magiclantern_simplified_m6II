@@ -3958,14 +3958,23 @@ abort_and_check_early_stop:
                 }
             }
 
+#ifdef CONFIG_M6II
+            /*
+             * M6II bring-up: continuous grouped writes are proven good, but
+             * shutdown consistently stalls on the final single queued frame.
+             * Drop only this tail frame on stop so the file can close cleanly.
+             * At 23.976p this sacrifices at most ~42 ms of footage.
+             */
+            DryosDebugMsg(0, 15,
+                "M6II RAW stop: dropping tail slot=%d frame=%d size=%d status=%d",
+                slot_index, slots[slot_index].frame_number,
+                slots[slot_index].size, slots[slot_index].status);
+            free_slot(slot_index);
+            continue;
+#else
             slots[slot_index].status = SLOT_WRITING;
 
             if (indicator_display == INDICATOR_RAW_BUFFER) show_buffer_status();
-#ifdef CONFIG_M6II
-            NotifyBox(1200, "M6II stop: writing tail frame");
-            DryosDebugMsg(0, 15, "M6II RAW stop: tail write begin slot=%d size=%d",
-                          slot_index, slots[slot_index].size);
-#endif
             if (!write_frames(&f, slots[slot_index].ptr, slots[slot_index].size,
                               slots[slot_index].is_meta ? 0 : 1, card_index))
             {
@@ -3973,11 +3982,8 @@ abort_and_check_early_stop:
                 beep();
                 break;
             }
-#ifdef CONFIG_M6II
-            NotifyBox(1200, "M6II stop: tail frame written");
-            DryosDebugMsg(0, 15, "M6II RAW stop: tail write done");
-#endif
             free_slot(slot_index);
+#endif
         }
     }
 
