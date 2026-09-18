@@ -160,18 +160,20 @@ EC811[1]>VramState
 #define YUV422_LV_PITCH               736 // Is it 736 or 720? No scalling on XCM but UI is 720, OutputChunk 736
 #define YUV422_HD_BUFFER_DMA_ADDR     0x0 // TODO: Fix it, null pointer!. It expects this to be shamem_read(some_DMA_ADDR)
 
-/* M6II 1.1.1 Canon RAW destination EDMAC writer.
- * Proven from ROM0.BIN (base 0xE0000000):
- *   RAW state +0x50 = logical channel 0x4B
- *   channel table   = 0xE1008944
- *   table[0x4B]     = 0xD04C0300
- *   edmac_set_size  = 0xE058096E -> +0x48/+0x4C/+0x50/+0x54
- *   edmac_set_addr  = 0xE0580962 -> +0xA0
+/* M6II 1.1.1 LiveView RAW destination EDMAC writer.
  *
- * Runtime reads of these configuration registers return zero on M6II even
- * while Canon RAW state is live; do not "fix" this by changing the block.
+ * Runtime census around lv_save_raw(1) proves logical channel 3:
+ *   DmacInfo[3]      = 0xD0420200 (WRITE, mode 0x00686411)
+ *   +0x50 yb_xb      = 0x07CF1864
+ *                      -> 2000 lines, 0x1864 bytes/line
+ *                      -> 3568 pixels at 14 bpp
+ *   +0xA0 ram_addr   = 0x64FEC488 in the captured test
+ *                      -> exactly matches Canon RAW state +0x58.
+ *
+ * This is the same D8 RAW-writer MMIO layout used by the M50/SX740/R ports,
+ * so generic raw.c can read geometry/buffer and redirect +0xA0 unchanged.
  */
-#define RAW_LV_EDMAC_CHANNEL_ADDR 0xD04C0300
+#define RAW_LV_EDMAC_CHANNEL_ADDR 0xD0420200
 
 // At time of writing R uses here "DispOperator_PropertyMasterSetDisplayTurnOffOn (%d)"
 // but I already found that our code expects this to be display statobject state
