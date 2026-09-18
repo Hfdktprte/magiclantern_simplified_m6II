@@ -1,229 +1,200 @@
 /** \file
- * edmac-memcpy.c reimplementation for Digic 8 in general.
- */
-/*
- * Copyright (C) 2024 Magic Lantern Team
+ * EOS M6 Mark II DIGIC 8 EDMAC memcpy backend for mlv_lite.
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the
- * Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor,
- * Boston, MA  02110-1301, USA.
+ * Use Canon's native MemoryToMemoryEsub5 wrappers recovered from the
+ * M6II 1.1.1 ROM.  The same configuration was validated by the v3
+ * one-shot 1 MiB RAM copy test.
  */
 
-// mimic edmac-memcpy.c
-#ifndef CONFIG_EDMAC_MEMCPY_D8
-#include <dryos.h>
-#include <edmac.h>
-#include <arm-mcr.h>
-/*
- * EDMAC mem2mem copy
- */
+#include "edmac-memcpy.h"
+#include "dryos.h"
+#include "edmac.h"
+#include "arm-mcr.h"
 
-/*
- * On D8 those take a list of subchips (0-6), terminated with 7.
- * Those seem to match channels: EDOMAIN_EDMAC_1_* to EDOMAIN_EDMAC_7_*
- * where SubChipID is N-1 from above.
- * If you don't wake SubChip before any edmac mmio r/w attempt, camera will
- * hard lock.
- */
-extern void PwrMng_WakeSubChips(const uint32_t *list);
-extern void PwrMng_SuspendSubChips(const uint32_t *list);
+#define M6II_MEM2MEM_RD_CH 61u
+#define M6II_MEM2MEM_WR_CH 24u
+#define M6II_MEM2MEM_MODE  1u
 
+static uint32_t m6ii_mem2mem_resources[] = { 0x0005001Fu, 0x00050023u };
+static const uint32_t m6ii_mem2mem_devices[] = { 4u, 7u };
 
-/*
- * Direct use of EDMAC stubs.
- * What's different from D7 is that ConnectReadEDmac_maybe takes only one arg:
- * read emdac channel. Not a single stub takes "device id" as argument, and
- * there's no ConnectWriteEDmac equv.
- * Theory for now is: connections are either set up via some of edmac config
- * structures, or Boomer (BoomerVdKick, BoomerSelect...) is responsible for that.
- */
-extern void edmac_reset_channel(uint32_t channel);
-extern void edmac_reset_boomer_vdkick(uint32_t channel);
-extern void edmac_reset_packunpack_mode(uint32_t channel);
-extern void edmac_set_address(uint32_t channel, void *addr);
-extern void edmac_set_size(uint32_t channel, struct edmac_info *edmac_info);
-extern void edmac_set_transfer_mode(uint32_t channel, uint32_t mode);
-extern void edmac_select_boomer(uint32_t channel, uint32_t flags);
-extern void StartEDmac_maybe(uint32_t channel);            // call twice for each channel
-extern void ConnectReadEDmac_maybe(uint32_t wr_channel);   // call only for write channel!
-extern void edmac_stop_boomer_maybe(uint32_t channel);
+/* Public symbols expected by mlv_lite. */
+uint32_t edmac_read_chan  = M6II_MEM2MEM_RD_CH;
+uint32_t edmac_write_chan = M6II_MEM2MEM_WR_CH;
 
+struct LockEntry;
+typedef void (*m6ii_esub5_setup_fn)(const uint32_t *channels);
+typedef void (*m6ii_esub5_callback_fn)(void (*cbr)(void *), void *ctx);
+typedef void (*m6ii_esub5_void_fn)(void);
+typedef void (*m6ii_esub5_addr_fn)(const uint32_t *addresses);
+typedef void (*m6ii_esub5_size_fn)(const uintptr_t *args);
+typedef struct LockEntry *(*m6ii_create_lock_fn)(uint32_t *resources, uint32_t count);
+typedef unsigned int (*m6ii_lock_fn)(struct LockEntry *lock);
+typedef void (*m6ii_power_fn)(const uint32_t *list);
+
+/* M6II 1.1.1 ROM0 base = 0xE0000000. */
+#define M6II_ESUB5_SETUP       ((m6ii_esub5_setup_fn)(0xE0639898u | 1u))
+#define M6II_ESUB5_CLEANUP     ((m6ii_esub5_void_fn)(0xE0639922u | 1u))
+#define M6II_ESUB5_SET_CBR     ((m6ii_esub5_callback_fn)(0xE063993Cu | 1u))
+#define M6II_ESUB5_RESET_CBR   ((m6ii_esub5_void_fn)(0xE0639946u | 1u))
+#define M6II_ESUB5_START       ((m6ii_esub5_void_fn)(0xE0639952u | 1u))
+#define M6II_ESUB5_SET_ADDR    ((m6ii_esub5_addr_fn)(0xE063996Cu | 1u))
+#define M6II_ESUB5_SET_SIZE    ((m6ii_esub5_size_fn)(0xE0639986u | 1u))
+
+#define M6II_PWR_WAKE          ((m6ii_power_fn)(0xE0630EB6u | 1u))
+#define M6II_PWR_SUSPEND       ((m6ii_power_fn)(0xE0630EE4u | 1u))
+#define M6II_CREATE_LOCK       ((m6ii_create_lock_fn)(0xE057978Au | 1u))
+#define M6II_LOCK_RESOURCES    ((m6ii_lock_fn)(0xE0579972u | 1u))
+#define M6II_UNLOCK_RESOURCES  ((m6ii_lock_fn)(0xE0579A0Cu | 1u))
+#define M6II_DELETE_LOCK       ((m6ii_lock_fn)(0xE057986Eu | 1u))
+
+static struct LockEntry *m6ii_mem2mem_lock = 0;
 
 /*
- * Event flags. Paths use those a lot.
- * We use this to distinguish between a successfull failed data copy
+ * Only one MLV rectangle copy may be active at once; mlv_lite enforces this
+ * with edmac_active.  Keep the geometry in static storage so Canon's native
+ * path never observes stack-backed descriptors after this function returns.
  */
-extern uint32_t CreateEventFlag_strictly(const char *name);
-extern uint32_t SetEventFlag(uint event_id, uint flag);
-extern uint32_t WaitForAnyEventFlag(uint32_t event_id, uint32_t flag, uint32_t timeout);
-extern uint32_t ClearEventFlag(uint32_t event_id, uint32_t flag);
-extern uint32_t DeleteEventFlag(uint32_t event_id);
+static struct edmac_info m6ii_src_region;
+static struct edmac_info m6ii_dst_region;
 
+static volatile int m6ii_esub5_setup_active = 0;
+static volatile int m6ii_copy_done = 0;
+static void (*m6ii_user_cbr_r)(void *) = 0;
+static void (*m6ii_user_cbr_w)(void *) = 0;
+static void *m6ii_user_cbr_ctx = 0;
 
-/*
- * Bilal M50 architecture, with only the proven M6II 1.1.1
- * MemoryToMemoryEsub5 bindings substituted.
- */
-const uint32_t mem2mem_devices[2] = {4, 7};
-uint32_t mem2mem_resources[2] = {0x0005001F, 0x00050023};
-#define MEM2MEM_RD_CH 61
-#define MEM2MEM_WR_CH 24
-#define MEM2MEM_BOOMER_SELECTOR 0x00C2060D
-#define MEM2MEM_MODE 0x1
-#define MEM2MEM_WAIT_MS 50
-
-struct LockEntry * mem2mem_lock;
-uint32_t mem2mem_event;
-uint32_t mem2mem_status;
-
-/* Keep Bilal's callback logic; adapt only to the core edmac.h callback ABI. */
-static void mem2mem_CBR(void *ctx)
+static void m6ii_finish_previous_copy(void)
 {
-  uint32_t arg = (uint32_t)ctx;
-  uint32_t old_irq = cli();
-  mem2mem_status = mem2mem_status | arg;
-  sei(old_irq);
-  if (mem2mem_status == 3) {
-    SetEventFlag(mem2mem_event, 1);
-  }
+    if (!m6ii_esub5_setup_active)
+        return;
+
+    M6II_ESUB5_CLEANUP();
+    M6II_ESUB5_RESET_CBR();
+    m6ii_esub5_setup_active = 0;
+    m6ii_user_cbr_r = 0;
+    m6ii_user_cbr_w = 0;
+    m6ii_user_cbr_ctx = 0;
 }
 
-uint32_t mem2mem_emdac_copy_d8(void * src, void * dst, struct edmac_info * src_info, struct edmac_info * dst_info)
+/*
+ * Canon's Esub5 callback is the actual hardware completion signal.
+ * Do not perform path teardown here: this callback may execute in a context
+ * where cleanup is unsafe.  Teardown is deferred until the next copy (or
+ * resource unlock).  MLV's write callback clears edmac_active immediately.
+ */
+static void m6ii_copy_done_cbr(void *ctx)
 {
+    (void)ctx;
+    m6ii_copy_done = 1;
 
-    // reset channels
-    edmac_reset_channel(MEM2MEM_RD_CH);
-    edmac_reset_channel(MEM2MEM_WR_CH);
+    void (*cbr_r)(void *) = m6ii_user_cbr_r;
+    void (*cbr_w)(void *) = m6ii_user_cbr_w;
+    void *user_ctx = m6ii_user_cbr_ctx;
 
-    // boomer selector - the great D8 unknown.
-    edmac_reset_boomer_vdkick(MEM2MEM_WR_CH);
-    edmac_select_boomer(MEM2MEM_WR_CH, MEM2MEM_BOOMER_SELECTOR);
-
-    mem2mem_event = CreateEventFlag_strictly("Mem2MemD8Copy");
-    mem2mem_status = 0;
-    RegisterEDmacCompleteCBR(MEM2MEM_RD_CH, mem2mem_CBR, (void *)1);
-    RegisterEDmacCompleteCBR(MEM2MEM_WR_CH, mem2mem_CBR, (void *)2);
-
-    edmac_reset_packunpack_mode(MEM2MEM_RD_CH);
-    edmac_reset_packunpack_mode(MEM2MEM_WR_CH);
-
-    /**
-     * "StartMem2MemPath" stage
-     */
-    edmac_set_address(MEM2MEM_WR_CH, dst);
-    edmac_set_address(MEM2MEM_RD_CH, src);
-
-    edmac_set_size(MEM2MEM_WR_CH, dst_info);
-    edmac_set_size(MEM2MEM_RD_CH, src_info);
-    edmac_set_transfer_mode(MEM2MEM_WR_CH, MEM2MEM_MODE);
-    edmac_set_transfer_mode(MEM2MEM_RD_CH, MEM2MEM_MODE);
-
-    StartEDmac_maybe(MEM2MEM_WR_CH);
-    StartEDmac_maybe(MEM2MEM_RD_CH);
-    ConnectReadEDmac_maybe(MEM2MEM_RD_CH);
-
-    // Wait for transfer to either end or timeout
-    WaitForAnyEventFlag(mem2mem_event, 1, MEM2MEM_WAIT_MS);
-    ClearEventFlag(mem2mem_event, 1);
-
-    /**
-     * "TermMem2MemPath" stage
-     */
-    UnregisterEDmacCompleteCBR(MEM2MEM_WR_CH);
-    UnregisterEDmacCompleteCBR(MEM2MEM_RD_CH);
-    edmac_stop_boomer_maybe(MEM2MEM_WR_CH);
-
-    DeleteEventFlag(mem2mem_event);
-
-    return mem2mem_status == 3 ? 0 : 1;
+    if (cbr_r)
+        cbr_r(user_ctx);
+    if (cbr_w)
+        cbr_w(user_ctx);
 }
 
-void edmac_memcpy_res_lock()
+void edmac_memcpy_res_lock(void)
 {
-    mem2mem_lock = CreateResLockEntry(mem2mem_resources, sizeof(mem2mem_resources)/sizeof(mem2mem_resources[0]));
-    LockEngineResources(mem2mem_lock);
+    if (m6ii_mem2mem_lock)
+        return;
 
-    PwrMng_WakeSubChips(mem2mem_devices);
+    m6ii_mem2mem_lock = M6II_CREATE_LOCK(
+        m6ii_mem2mem_resources,
+        COUNT(m6ii_mem2mem_resources)
+    );
+    if (!m6ii_mem2mem_lock)
+        return;
+
+    M6II_LOCK_RESOURCES(m6ii_mem2mem_lock);
+    M6II_PWR_WAKE(m6ii_mem2mem_devices);
 }
 
-void edmac_memcpy_res_unlock()
+void edmac_memcpy_res_unlock(void)
 {
-    PwrMng_SuspendSubChips(mem2mem_devices);
-    UnLockEngineResources(mem2mem_lock);
+    m6ii_finish_previous_copy();
+
+    if (!m6ii_mem2mem_lock)
+        return;
+
+    M6II_PWR_SUSPEND(m6ii_mem2mem_devices);
+    M6II_UNLOCK_RESOURCES(m6ii_mem2mem_lock);
+    M6II_DELETE_LOCK(m6ii_mem2mem_lock);
+    m6ii_mem2mem_lock = 0;
 }
 
-// reimplement this wonderful function with mem2mem_emdac_copy_d8
 void* edmac_copy_rectangle_cbr_start(void *dst, void *src,
                                      int src_width, int src_x, int src_y,
                                      int dst_width, int dst_x, int dst_y,
                                      int w, int h,
-                                     void (*cbr_r)(void *), void (*cbr_w)(void *), void *cbr_ctx)
+                                     void (*cbr_r)(void *), void (*cbr_w)(void *),
+                                     void *cbr_ctx)
 {
-    // "src_width" is width of the frame including dark areas, borders etc.
-    // "w" is the width of the region to copy out, e.g. if stripping the borders.
+    if (!src || !dst || w <= 0 || h <= 0)
+        return 0;
 
-    if ((src == NULL) || (dst == NULL))
-    {
-        //ASSERT(0);
-        return NULL;
-    }
+    /*
+     * The previous copy has already signalled completion (otherwise MLV would
+     * still have edmac_active set and would not start another one).
+     */
+    m6ii_finish_previous_copy();
 
-    // Old code doesn't explain why it checks this, my guess is
-    // because DMA transfers don't invalidate CPU cache, since
-    // they're outside of the CPU.
-    //ASSERT(dst == UNCACHEABLE(dst));
-
-    /* clean the cache before reading from regular (cacheable) memory */
-    /* see FIO_WriteFile for more info */
-    if (src != UNCACHEABLE(src)) // inverted to make 2GB compatible
-    {
+    /* Clean CPU cache before a DMA read from cacheable RAM. */
+    if (src != UNCACHEABLE(src))
         sync_caches();
-    }
 
-    /* create a memory suite from a already existing (continuous) memory block with given size.                  */
-    /* note: src_adjusted, dst_adjusted are necessary to crop black borders, original code is:                   */
-    /* uint32_t src_adjusted = ((uint32_t)src & 0x1FFFFFFF) + src_x + src_y * src_width;                         */
-    /* uint32_t dst_adjusted = ((uint32_t)dst & 0x1FFFFFFF) + dst_x + dst_y * dst_width;                         */
-    /* which gave courrpted frames on M5O, probably also on D8 cams, it's CACHEABLE vs UNCACHEABLE memory issue? */
+    uint32_t src_adjusted = (uint32_t)src + src_x + src_y * src_width;
+    uint32_t dst_adjusted = (uint32_t)dst + dst_x + dst_y * dst_width;
 
-    uint32_t src_adjusted = ((uint32_t)src) + src_x + src_y * src_width;
-    uint32_t dst_adjusted = ((uint32_t)dst) + dst_x + dst_y * dst_width;
+    memset(&m6ii_src_region, 0, sizeof(m6ii_src_region));
+    memset(&m6ii_dst_region, 0, sizeof(m6ii_dst_region));
 
-    struct edmac_info src_region = {
-        .off1b = src_width - w,
-        .xb = w,
-        .yb = h - 1,
+    m6ii_src_region.off1b = src_width - w;
+    m6ii_src_region.xb = w;
+    m6ii_src_region.yb = h - 1;
+
+    m6ii_dst_region.off1b = dst_width - w;
+    m6ii_dst_region.xb = w;
+    m6ii_dst_region.yb = h - 1;
+
+    const uint32_t channels[2] = {
+        M6II_MEM2MEM_RD_CH,
+        M6II_MEM2MEM_WR_CH
+    };
+    const uint32_t addresses[2] = {
+        src_adjusted,
+        dst_adjusted
+    };
+    const uintptr_t size_args[3] = {
+        (uintptr_t)&m6ii_src_region,
+        (uintptr_t)&m6ii_dst_region,
+        M6II_MEM2MEM_MODE
     };
 
-    struct edmac_info dst_region = {
-        .off1b = 0,
-        .xb = w,
-        .yb = h - 1,
-    };
+    m6ii_user_cbr_r = cbr_r;
+    m6ii_user_cbr_w = cbr_w;
+    m6ii_user_cbr_ctx = cbr_ctx;
+    m6ii_copy_done = 0;
 
-    mem2mem_emdac_copy_d8((void*)src_adjusted, (void*)dst_adjusted, &src_region, &dst_region);
-    cbr_w(NULL); // clears edmac_active, we have no CBR to do this
+    M6II_ESUB5_SETUP(channels);
+    m6ii_esub5_setup_active = 1;
+    M6II_ESUB5_SET_CBR(m6ii_copy_done_cbr, 0);
+    M6II_ESUB5_SET_ADDR(addresses);
+    M6II_ESUB5_SET_SIZE(size_args);
+    M6II_ESUB5_START();
+
+    /* Asynchronous: Canon callback will clear mlv_lite's edmac_active. */
     return dst;
 }
 
-// dummy stubs to make mlv_lite happy
-void edmac_copy_rectangle_adv_cleanup()
+void edmac_copy_rectangle_adv_cleanup(void)
 {
+    /*
+     * Called from mlv_lite's write-complete callback.  Native Esub5 teardown
+     * is deliberately deferred to the next copy/resource unlock.
+     */
 }
-
-uint32_t edmac_read_chan = 0x6; // dummy, don't use
-uint32_t edmac_write_chan = 0x6; // dummy, don't use
-
-#endif
