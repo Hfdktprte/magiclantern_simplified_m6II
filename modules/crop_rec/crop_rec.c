@@ -11,7 +11,6 @@
 #include <raw.h>
 #include <fps.h>
 #include <shoot.h>
-#include <compositor.h>
 
 #undef CROP_DEBUG
 
@@ -165,7 +164,7 @@ static void m6ii_restore_canon_layers(void)
 {
     if (m6ii_canon_layers_hidden)
     {
-        compositor_set_canon_layers_visible(1);
+        canon_gui_enable_front_buffer(0);
         m6ii_canon_layers_hidden = 0;
     }
 }
@@ -188,11 +187,13 @@ static void m6ii_preview_task(void *unused)
         if (want_clean_canon)
         {
             /*
-             * Reassert this while active: Canon may refresh its own XCM layer
-             * state. ML's dedicated layer is not touched.
+             * Use ML core's Canon front-buffer gate. The ML menu already uses
+             * this successfully on D8; unlike direct XOC layer toggles, it is
+             * integrated with Canon/WINSYS redraw handling.
              */
-            if (compositor_set_canon_layers_visible(0))
-                m6ii_canon_layers_hidden = 1;
+            if (!canon_gui_front_buffer_disabled())
+                canon_gui_disable_front_buffer();
+            m6ii_canon_layers_hidden = 1;
         }
         else
         {
