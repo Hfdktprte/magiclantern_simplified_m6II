@@ -4,12 +4,17 @@
 #include <dryos.h>
 #include <menu.h>
 #include <fio-ml.h>
-#include <patch.h>
 #include <config.h>
 
 extern int M6II_SdCARDGetSpeed(uint32_t dev, uint32_t *speed, uint32_t *clock_selector);
 extern int M6II_SD_ReConfiguration(void);
 extern int M6II_DebugSTG_IsUHSCard(void);
+extern void m6ii_bilal_sd_set_values(const uint32_t *vals);
+extern void m6ii_bilal_sd_reset_stats(void);
+extern void m6ii_bilal_sd_get_stats(uint32_t *calls, uint32_t *hits,
+                                    uint32_t *last_dev, uint32_t *last_selector);
+extern int m6ii_bilal_sd_install_hook(void);
+extern int m6ii_bilal_sd_remove_hook(void);
 
 /*
  * M6II 1.1.1 / DIGIC 8 Bilal sd_uhs port notes.
@@ -70,13 +75,6 @@ static volatile int m6ii_sd_test_busy = 0;
 #define M6II_SELECTOR9_TABLE 0x0001E5E8
 
 /* Known-good Canon device-0 blocks from the user's M6II table dump. */
-static const uint32_t m6ii_canon_156[11] =
-{
-    0x00000001, 0x00000001, 0x1D000001, 0x00000000,
-    0x00000100, 0x00000100, 0x00000100, 0x00000100,
-    0x00000000, 0x00000001, 0x00000001,
-};
-
 static const uint32_t m6ii_canon_195[11] =
 {
     0x00000001, 0x00000001, 0x1D000001, 0x00000000,
@@ -114,9 +112,6 @@ static int m6ii_regs_match(const uint32_t *vals)
 static CONFIG_INT("sd.m6ii_bilal_boot_test", m6ii_bilal_boot_test, 0);
 
 static uint32_t m6ii_uhs_vals[11];
-static struct patch m6ii_bilal_hook_patch[1];
-static uint8_t m6ii_bilal_hook_code[8] __attribute__((aligned(4)));
-static int m6ii_bilal_hook_installed = 0;
 
 static volatile uint32_t m6ii_hook_calls = 0;
 static volatile uint32_t m6ii_hook_hits = 0;
@@ -137,105 +132,6 @@ static uint32_t m6ii_boot_clock_after = 0xffffffff;
 static int m6ii_boot_live_195 = 0;
 static uint32_t m6ii_boot_div = 0xffffffff;
 
-static void m6ii_bilal_post_preset_override(uint32_t dev, uint32_t selector)
-{
-    m6ii_hook_calls++;
-    m6ii_hook_last_dev = dev;
-    m6ii_hook_last_selector = selector;
-
-    if (dev == M6II_SD_DEVICE && selector == 9)
-    {
-        /*
-         * Stock validation uses Canon's own 195-MHz values.
-         * Later, Bilal-style 160/192/240 D8 arrays will occupy this same
-         * uhs_vals[] buffer; the hook mechanism itself will not change.
-         */
-        for (int i = 0; i < COUNT(m6ii_uhs_regs); i++)
-            MEM(m6ii_uhs_regs[i]) = m6ii_uhs_vals[i];
-
-        m6ii_hook_hits++;
-    }
-}
-
-/*
- * D678X convert_f_patch_to_patch() replaces 8 bytes with an absolute jump;
- * unlike the old D5 patch_hook_function(), it does not manufacture a
- * callback frame.  Use the same proven pattern as the M6II RAW EDMAC hook:
- * preserve Canon's registers, call our helper, replay the displaced
- * instructions semantically, then resume after the 8-byte patch.
- *
- * Displaced E012BEA4..E012BEAB:
- *   movs r1,#5
- *   mov  r0,r5
- *   bl   E043DC08
- */
-static void __attribute__((noinline,naked,aligned(4)))
-m6ii_bilal_post_preset_trampoline(void)
-{
-    asm volatile(
-        "push {r0-r12, lr}\n"
-        "mov  r0, r5\n"
-        "mov  r1, r4\n"
-        "mov  r3, %0\n"
-        "blx  r3\n"
-        "pop  {r0-r12, lr}\n"
-
-        /* replay displaced instructions */
-        "movs r1, #5\n"
-        "mov  r0, r5\n"
-        "movw r3, #0xDC09\n"
-        "movt r3, #0xE043\n"
-        "blx  r3\n"
-
-        /* resume at E012BEAC */
-        "movw r3, #0xBEAD\n"
-        "movt r3, #0xE012\n"
-        "bx   r3\n"
-        :
-        : "r"(m6ii_bilal_post_preset_override)
-        : "r3"
-    );
-}
-
-static int m6ii_install_bilal_hook(void)
-{
-    struct function_hook_patch def =
-    {
-        .patch_addr = M6II_SD_POST_PRESET_HOOK,
-        .target_function_addr = (uint32_t)m6ii_bilal_post_preset_trampoline,
-        .description = "sd_clock: M6II Bilal post-preset override",
-    };
-
-    static const uint8_t expected[8] =
-    {
-        0x05, 0x21, 0x28, 0x46, 0x11, 0xF3, 0xAE, 0xFE
-    };
-
-    for (int i = 0; i < 8; i++)
-        def.orig_content[i] = expected[i];
-
-    int err = convert_f_patch_to_patch(&def,
-                                      &m6ii_bilal_hook_patch[0],
-                                      &m6ii_bilal_hook_code[0]);
-    if (err != E_PATCH_OK)
-        return err;
-
-    err = apply_patches(m6ii_bilal_hook_patch, 1);
-    if (err == E_PATCH_OK)
-        m6ii_bilal_hook_installed = 1;
-
-    return err;
-}
-
-static void m6ii_remove_bilal_hook(void)
-{
-    if (!m6ii_bilal_hook_installed)
-        return;
-
-    unpatch_memory(M6II_SD_POST_PRESET_HOOK);
-    m6ii_bilal_hook_installed = 0;
-}
-
 static void m6ii_run_startup_stock_validation(void)
 {
     m6ii_boot_test_ran = 1;
@@ -245,6 +141,8 @@ static void m6ii_run_startup_stock_validation(void)
     m6ii_hook_last_selector = 0xffffffff;
 
     m6ii_copy_words(m6ii_uhs_vals, m6ii_canon_195, 11);
+    m6ii_bilal_sd_set_values(m6ii_uhs_vals);
+    m6ii_bilal_sd_reset_stats();
 
     m6ii_boot_get_before =
         M6II_SdCARDGetSpeed(M6II_SD_DEVICE,
@@ -252,7 +150,7 @@ static void m6ii_run_startup_stock_validation(void)
                             &m6ii_boot_clock_before);
     m6ii_boot_uhs_before = M6II_DebugSTG_IsUHSCard();
 
-    m6ii_boot_patch_rc = m6ii_install_bilal_hook();
+    m6ii_boot_patch_rc = m6ii_bilal_sd_install_hook();
     if (m6ii_boot_patch_rc == E_PATCH_OK)
     {
         /*
@@ -270,7 +168,11 @@ static void m6ii_run_startup_stock_validation(void)
         m6ii_boot_live_195 = m6ii_regs_match(m6ii_canon_195);
         m6ii_boot_div = MEM(0xD0100604);
 
-        m6ii_remove_bilal_hook();
+        m6ii_bilal_sd_get_stats((uint32_t *)&m6ii_hook_calls,
+                                (uint32_t *)&m6ii_hook_hits,
+                                (uint32_t *)&m6ii_hook_last_dev,
+                                (uint32_t *)&m6ii_hook_last_selector);
+        m6ii_bilal_sd_remove_hook();
     }
 
     /*
