@@ -363,6 +363,11 @@ static volatile                 uint32_t skip_frames = 0;
 
 /* for compress_task */
 static struct msg_queue * compress_mq = 0;
+#ifdef CONFIG_M6II
+/* Stop handshake: raw_rec_task must not flush/free buffers until the
+ * compression task has completed the final native Esub5 copy and unlock. */
+static volatile int m6ii_compress_stop_done = 1;
+#endif
 
 static GUARDED_BY(RawRecTask)   mlv_file_hdr_t file_hdr[CARD_COUNT];
 static GUARDED_BY(RawRecTask)   mlv_rawi_hdr_t rawi_hdr;
@@ -2744,6 +2749,20 @@ static void compress_task()
         {
             /* stop_recording */
 
+#ifdef CONFIG_M6II
+            /*
+             * The final frame message may have started an asynchronous native
+             * Esub5 copy immediately before this stop message.  Do not tear
+             * the engine down underneath that DMA.
+             */
+            int m6ii_wait = 0;
+            while (edmac_active && m6ii_wait < 1500)
+            {
+                msleep(1);
+                m6ii_wait++;
+            }
+#endif
+
             if (OUTPUT_COMPRESSION == 0)
             {
                 /* exclusive edmac access no longer needed */
@@ -2753,6 +2772,9 @@ static void compress_task()
 
             edmac_stop_spy();
 
+#ifdef CONFIG_M6II
+            m6ii_compress_stop_done = 1;
+#endif
             continue;
         }
 
@@ -3481,6 +3503,9 @@ void raw_video_rec_task(uint32_t card_index)
         /* signal start of recording to the compression task */
         // FIXME SJE let's not use INT_MAX as a signal with meaning,
         // it's lazy and deceptive.  We should probably use an enum instead.
+#ifdef CONFIG_M6II
+        m6ii_compress_stop_done = 0;
+#endif
         msg_queue_post(compress_mq, INT_MAX);
 
         /* fake recording status, to integrate with other ml stuff (e.g. hdr video */
@@ -3813,6 +3838,25 @@ abort_and_check_early_stop:
 
     /* signal end of recording to the compression task */
     msg_queue_post(compress_mq, INT_MIN);
+
+#ifdef CONFIG_M6II
+    /*
+     * Wait until compress_task has drained the final frame, observed its DMA
+     * completion callback and released Esub5.  Without this handshake, the
+     * raw task can flush/free the last slot while DMA is still using it.
+     */
+    int m6ii_stop_wait = 0;
+    while (!m6ii_compress_stop_done && m6ii_stop_wait < 2000)
+    {
+        msleep(1);
+        m6ii_stop_wait++;
+    }
+    if (!m6ii_compress_stop_done)
+    {
+        NotifyBox(5000, "M6II Esub5 stop timeout; reboot before REC");
+        printf("M6II: Esub5 stop handshake timeout\n");
+    }
+#endif
 
     set_recording_custom(CUSTOM_RECORDING_NOT_RECORDING);
 
