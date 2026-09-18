@@ -2343,10 +2343,23 @@ void hack_liveview(int unhack)
     {
         idle_globaldraw_dis();
         clrscr();
+
+#if defined(CONFIG_M6II)
+        /*
+         * On D8, Global Draw only controls ML graphics. Hide Canon's front
+         * buffer explicitly as well. This is the same core path used by the
+         * ML menu itself, so it preserves ML's own RGBA compositor layer.
+         */
+        canon_gui_disable_front_buffer();
+#endif
+
         raw_killgd_active = 1;
     }
     else if (unhack && raw_killgd_active)
     {
+#if defined(CONFIG_M6II)
+        canon_gui_enable_front_buffer(0);
+#endif
         idle_globaldraw_en();
         raw_killgd_active = 0;
     }
