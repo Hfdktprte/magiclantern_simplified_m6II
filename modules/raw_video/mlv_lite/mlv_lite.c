@@ -311,20 +311,54 @@ static volatile int raw_recording_state = RAW_IDLE;
 
 /*
  * Optional module API used by the M6II crop_rec preview port.
- * This exports the exact rectangle mlv_lite will write, rather than asking
- * another module to reverse-engineer framing from Canon LiveView.
+ * These helpers keep framing synchronized with mlv_lite's own settings.
  */
 int mlv_lite_get_recording_rect(int *x, int *y, int *w, int *h, int *bpp)
 {
-    if (!raw_video_enabled || !lv || res_x <= 0 || res_y <= 0)
+    if (!settings_sem || !raw_video_enabled || !lv)
         return 0;
 
-    if (x)   *x   = skip_x;
-    if (y)   *y   = skip_y;
-    if (w)   *w   = res_x;
-    if (h)   *h   = res_y;
-    if (bpp) *bpp = BPP;
-    return 1;
+    take_semaphore(settings_sem, 0);
+
+    int ok = (res_x > 0 && res_y > 0);
+    if (ok)
+    {
+        if (x)   *x   = skip_x;
+        if (y)   *y   = skip_y;
+        if (w)   *w   = res_x;
+        if (h)   *h   = res_y;
+        if (bpp) *bpp = BPP;
+    }
+
+    give_semaphore(settings_sem);
+    return ok;
+}
+
+/*
+ * Render one framing-correct RAW preview frame into the current Canon YUV
+ * display buffer.  This deliberately stays 14-bit-only until the core RAW
+ * preview/pixel accessors are validated for M6II 10/12-bit packing.
+ */
+int mlv_lite_render_recording_preview(int quality)
+{
+    if (!settings_sem || !raw_video_enabled || !lv)
+        return 0;
+
+    if (raw_info.bits_per_pixel != 14)
+        return 0;
+
+    take_semaphore(settings_sem, 0);
+
+    int ok = (res_x > 0 && res_y > 0 && raw_info.buffer);
+    if (ok)
+    {
+        raw_set_preview_rect(skip_x, skip_y, res_x, res_y, 1);
+        raw_force_aspect_ratio(0, 0);
+        raw_preview_fast_ex((void*)-1, (void*)-1, -1, -1, quality);
+    }
+
+    give_semaphore(settings_sem);
+    return ok;
 }
 
 /* True only for the historical RAW-video "Kill Global Draw" optimization. */
