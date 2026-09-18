@@ -296,7 +296,7 @@ static struct menu_entry m6ii_sd_test_menu[] =
                 .select = m6ii_sd_read_speed,
                 .icon_type = IT_ACTION,
                 .help = "Call Canon SdCARDGetSpeed for SD device 0.",
-                .help2 = "Read-only. Stock SDR104 is expected to report speed=3 clock=9.",
+                .help2 = "Read-only. Stock SDR104 is speed=5, clock=9 on M6II 1.1.1.",
             },
             {
                 .name = "Test clock: 156 MHz",
