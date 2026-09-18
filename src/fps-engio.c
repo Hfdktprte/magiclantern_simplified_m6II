@@ -329,10 +329,11 @@ static void fps_read_current_timer_values();
      * In FHD60, A/B remain at the FHD30 values while the effective clock
      * doubles to 153.6 MHz.
      *
-     * Keep the high-clock rule limited to the measured FHD >=50fps path.
+     * Keep the high-clock rule limited to the measured FHD60 path.  FHD50
+     * has not been measured on M6II yet and must not be inferred here.
      */
     #define TG_FREQ_BASE ( \
-        (video_mode_resolution == 0 && video_mode_fps >= 50) \
+        (video_mode_resolution == 0 && video_mode_fps == 60) \
         ? 153600000 : 76800000)
     #define FPS_TIMER_A_MIN (fps_timer_a_orig)
 
