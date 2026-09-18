@@ -4,10 +4,10 @@
 #include <dryos.h>
 #include <menu.h>
 #include <fio-ml.h>
+#include <patch.h>
 
 extern int M6II_SdCARDGetSpeed(uint32_t dev, uint32_t *speed, uint32_t *clock_selector);
-extern int M6II_SddomTerminate(uint32_t dev);
-extern int M6II_SddomInitialize(uint32_t dev);
+extern int M6II_SD_ReConfiguration(void);
 
 /*
  * M6II 1.1.1 / DIGIC 8 Bilal sd_uhs port notes.
@@ -98,54 +98,91 @@ static int m6ii_regs_match(const uint32_t *vals)
     return 1;
 }
 
-static void m6ii_bilal_reconfig_task(void *arg)
+/*
+ * Bilal's D5 code forces SDR104 before SD_ReConfiguration().
+ * M6II's equivalent normal UHS-I setup calls are in SdDriverPowerOn:
+ *
+ *   E00B230E  ldr r0,[r4,#0x14] ; mov r1,r5 ; SdUHS1SetAccessMode
+ *   E00B2326  ldr r1,[sp,#0x10] ; ldr r0,[r4,#0x14] ; SdChangeClockSpeed
+ *
+ * For the stock validation only, force exactly the normal SDR104/195 values:
+ * mode 3 and selector 9.  This tests Bilal's "patch setup, then reconfigure"
+ * ordering without introducing any overclock preset.
+ */
+#define M6II_FORCE_ACCESS_PATCH 0xE00B230E
+#define M6II_FORCE_CLOCK_PATCH  0xE00B2326
+
+static struct patch m6ii_bilal_stock_patches[] =
 {
-    int mode = (int)(uintptr_t)arg; /* 0=stock only, 1=known-good 156 override */
-    volatile uint32_t *sel9 = (volatile uint32_t *)M6II_SELECTOR9_TABLE;
-    uint32_t saved[11];
+    {
+        .addr = (uint8_t *)M6II_FORCE_ACCESS_PATCH,
+        .old_value = 0x46296960, /* ldr r0,[r4,#0x14] ; mov r1,r5 */
+        .new_value = 0x21036960, /* ldr r0,[r4,#0x14] ; movs r1,#3 */
+        .size = 4,
+        .description = "sd_clock: force SDR104 during M6II reconfig",
+        .is_instruction = 1,
+    },
+    {
+        .addr = (uint8_t *)M6II_FORCE_CLOCK_PATCH,
+        .old_value = 0x69609904, /* ldr r1,[sp,#0x10] ; ldr r0,[r4,#0x14] */
+        .new_value = 0x69602109, /* movs r1,#9 ; ldr r0,[r4,#0x14] */
+        .size = 4,
+        .description = "sd_clock: force stock selector 9 during M6II reconfig",
+        .is_instruction = 1,
+    },
+};
 
-    for (int i = 0; i < 11; i++)
-        saved[i] = sel9[i];
+static void m6ii_bilal_stock_hook_task(void *unused)
+{
+    uint32_t speed_before = 0xffffffff;
+    uint32_t clock_before = 0xffffffff;
+    uint32_t speed_after = 0xffffffff;
+    uint32_t clock_after = 0xffffffff;
 
-    uint32_t speed_before = 0xffffffff, clock_before = 0xffffffff;
-    M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_before, &clock_before);
+    int get_before = M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_before, &clock_before);
+    uint32_t state_before = MEM(0x0000E3B8);
+    uint32_t uhs_before = MEM(0x0000E3E0);
 
-    if (mode == 1)
-        m6ii_copy_words(sel9, m6ii_canon_156, 11);
-    else
-        m6ii_copy_words(sel9, m6ii_canon_195, 11);
+    int patch_rc = apply_patches(m6ii_bilal_stock_patches,
+                                 COUNT(m6ii_bilal_stock_patches));
+    if (patch_rc)
+    {
+        NotifyBox(10000, "Bilal stock hook patch failed: %d", patch_rc);
+        m6ii_sd_test_busy = 0;
+        return;
+    }
 
     /*
-     * DIGIC-8 equivalent of Bilal's SD_ReConfiguration at the Sddom layer:
-     * terminate the active controller/card state, then run the complete
-     * Sddom initialization sequence for device 0.
-     *
-     * 0xE0178978 explicitly performs:
-     *   SddomSetPiass -> SddomHWInit -> SddomSWInit ->
-     *   SddomCARDSetUHSMode -> SddomCARDInitialize -> SddomCARDGetSpeed.
+     * Canon's DEVICE_POWER_CYCLE helper.  Unlike the failed raw Sddom test,
+     * this runs the full SdDriverPowerOn path while our Bilal-equivalent
+     * setup hooks are already installed.
      */
-    int term_rc = M6II_SddomTerminate(M6II_SD_DEVICE);
-    int init_rc = M6II_SddomInitialize(M6II_SD_DEVICE);
+    int reconfig_rc = M6II_SD_ReConfiguration();
     msleep(150);
 
-    uint32_t speed_after = 0xffffffff, clock_after = 0xffffffff;
-    int get_rc = M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_after, &clock_after);
+    int get_after = M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_after, &clock_after);
     int live_156 = m6ii_regs_match(m6ii_canon_156);
     int live_195 = m6ii_regs_match(m6ii_canon_195);
     uint32_t divider = MEM(0xD0100604);
+    uint32_t state_after = MEM(0x0000E3B8);
+    uint32_t uhs_after = MEM(0x0000E3E0);
 
-    m6ii_copy_words(sel9, saved, 11);
+    unpatch_memory(M6II_FORCE_CLOCK_PATCH);
+    unpatch_memory(M6II_FORCE_ACCESS_PATCH);
 
     DryosDebugMsg(0, 15,
-                  "M6II Bilal reconfig: mode=%d term=%d init=%d %d/%d -> %d/%d get=%d live156=%d live195=%d div=%d",
-                  mode, term_rc, init_rc, speed_before, clock_before,
-                  speed_after, clock_after, get_rc, live_156, live_195, divider);
+                  "M6II Bilal hooked stock: patch=%d rc=%d get=%d/%d %d/%d->%d/%d state=%d/%d uhs=%d/%d live156=%d live195=%d div=%d",
+                  patch_rc, reconfig_rc, get_before, get_after,
+                  speed_before, clock_before, speed_after, clock_after,
+                  state_before, state_after, uhs_before, uhs_after,
+                  live_156, live_195, divider);
 
-    NotifyBox(12000,
-              "Bilal Sddom %s\nterm=%d init=%d get=%d\nlogical %d/%d -> %d/%d\nlive156=%d live195=%d D0100604=%d",
-              mode ? "156 test" : "stock",
-              term_rc, init_rc, get_rc, speed_before, clock_before,
-              speed_after, clock_after, live_156, live_195, divider);
+    NotifyBox(15000,
+              "Bilal hooked stock\npatch=%d rc=%d get=%d/%d\nlogical %d/%d -> %d/%d\nstate=%d->%d uhs=%d->%d\nlive156=%d live195=%d div=%d",
+              patch_rc, reconfig_rc, get_before, get_after,
+              speed_before, clock_before, speed_after, clock_after,
+              state_before, state_after, uhs_before, uhs_after,
+              live_156, live_195, divider);
 
     m6ii_sd_test_busy = 0;
 }
@@ -159,21 +196,8 @@ static MENU_SELECT_FUNC(m6ii_reconfig_stock)
     }
 
     m6ii_sd_test_busy = 1;
-    task_create("m6ii_recfg_stock", 0x1c, 0x1800,
-                m6ii_bilal_reconfig_task, (void *)0);
-}
-
-static MENU_SELECT_FUNC(m6ii_bilal_validate_156)
-{
-    if (m6ii_sd_test_busy)
-    {
-        NotifyBox(2000, "SD port test already running");
-        return;
-    }
-
-    m6ii_sd_test_busy = 1;
-    task_create("m6ii_bilal_156", 0x1c, 0x1800,
-                m6ii_bilal_reconfig_task, (void *)1);
+    task_create("m6ii_bilal_stock", 0x1c, 0x1800,
+                m6ii_bilal_stock_hook_task, 0);
 }
 
 static void m6ii_read_speed_task(void *unused)
@@ -256,7 +280,8 @@ static void m6ii_bilal_dump_task(void *unused)
      * pre-init wrapper visible in the log while its exact lifecycle is mapped.
      */
     my_fprintf(f, "\nROM anchors\n");
-    my_fprintf(f, "SddomTerminate=E01786B4 SddomInitialize=E0178978\n");
+    my_fprintf(f, "SD_ReConfiguration DEVICE_POWER_CYCLE helper=E00BA8CC\n");
+    my_fprintf(f, "force_access_callsite=E00B230E force_clock_callsite=E00B2326\n");
     my_fprintf(f, "D8 preset switch=E012BB44 writer=E012BA6C\n");
 
     FIO_CloseFile(f);
@@ -297,18 +322,11 @@ static struct menu_entry m6ii_bilal_menu[] =
                 .help2 = "Stock M6II SDR104 has tested as speed=5, clock=9.",
             },
             {
-                .name = "Validate stock reconfigure",
+                .name = "Validate Bilal hooked stock",
                 .select = m6ii_reconfig_stock,
                 .icon_type = IT_ACTION,
-                .help = "Run M6II Sddom terminate/init using the untouched stock 195 preset.",
-                .help2 = "Validates Bilal-style reconfiguration without changing the clock preset.",
-            },
-            {
-                .name = "Validate Bilal path: 156",
-                .select = m6ii_bilal_validate_156,
-                .icon_type = IT_ACTION,
-                .help = "Feed Canon's known-good 156MHz array through the Sddom Bilal path.",
-                .help2 = "Do not run until the stock Sddom reconfiguration test passes.",
+                .help = "Force SDR104 + stock selector 9 in Canon setup, then power-cycle.",
+                .help2 = "Bilal ordering: patch setup first, then SD_ReConfiguration. No OC preset.",
             },
             {
                 .name = "Dump Bilal UHS tables",
