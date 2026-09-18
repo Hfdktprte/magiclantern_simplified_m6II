@@ -11,12 +11,12 @@ extern int M6II_SdChangeClockSpeed(uint32_t sd_handle, uint32_t clock_selector);
 extern int M6II_SdCARDGetSpeed(uint32_t sd_handle, uint32_t *speed, uint32_t *clock_selector);
 
 /*
- * M6II ROM 1.1.1: the UHS-I setup function loads 0x0000e384 as its
- * SD-driver state and passes state[0x14] to SdCARDGetSpeed and
- * SdChangeClockSpeed.
+ * M6II ROM 1.1.1 uses an SD device index as argument 0 for these APIs.
+ * DebugSTG_IsUHSCard explicitly calls the same driver family with r0 = 0.
+ * The DebugSTG state at 0xE384 also carries device 0 at +0x14; zero is
+ * therefore a valid device ID, not a NULL handle.
  */
-#define M6II_SD_DRIVER_STATE       0x0000e384
-#define M6II_SD_DRIVER_HANDLE_ADDR (M6II_SD_DRIVER_STATE + 0x14)
+#define M6II_SD_DEVICE 0
 
 struct m6ii_sd_device
 {
@@ -31,32 +31,22 @@ extern struct m6ii_sd_device * const sd_device[];
 static volatile int m6ii_sd_test_busy = 0;
 
 
-static uint32_t m6ii_sd_handle(void)
-{
-    return MEM(M6II_SD_DRIVER_HANDLE_ADDR);
-}
-
 static int m6ii_sd_get_speed_clock(uint32_t *speed, uint32_t *clock)
 {
-    uint32_t handle = m6ii_sd_handle();
-    if (!handle)
-        return -1;
-
-    return M6II_SdCARDGetSpeed(handle, speed, clock);
+    return M6II_SdCARDGetSpeed(M6II_SD_DEVICE, speed, clock);
 }
 
 static void m6ii_sd_speed_task(void *unused)
 {
     uint32_t speed = 0xffffffff;
     uint32_t clock = 0xffffffff;
-    uint32_t handle = m6ii_sd_handle();
     int err = m6ii_sd_get_speed_clock(&speed, &clock);
 
     DryosDebugMsg(0, 15,
-                  "M6II SD: handle=%08x speed=%d clock=%d err=%d",
-                  handle, speed, clock, err);
-    NotifyBox(7000, "SDR speed=%d clock=%d\nhandle=%08x err=%d",
-              speed, clock, handle, err);
+                  "M6II SD: dev=%d speed=%d clock=%d err=%d",
+                  M6II_SD_DEVICE, speed, clock, err);
+    NotifyBox(7000, "SDR speed=%d clock=%d\ndev=%d err=%d",
+              speed, clock, M6II_SD_DEVICE, err);
 
     m6ii_sd_test_busy = 0;
 }
@@ -68,16 +58,7 @@ static void m6ii_sd_clock_task(void *arg)
     uint32_t before_clock = 0xffffffff;
     uint32_t after_speed = 0xffffffff;
     uint32_t after_clock = 0xffffffff;
-    uint32_t handle = m6ii_sd_handle();
-
-    if (!handle)
-    {
-        NotifyBox(5000, "M6II SD handle is NULL");
-        m6ii_sd_test_busy = 0;
-        return;
-    }
-
-    int before_err = M6II_SdCARDGetSpeed(handle, &before_speed, &before_clock);
+    int before_err = M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &before_speed, &before_clock);
     if (before_err)
     {
         NotifyBox(5000, "GetSpeed before failed: %d", before_err);
@@ -85,9 +66,9 @@ static void m6ii_sd_clock_task(void *arg)
         return;
     }
 
-    int set_err = M6II_SdChangeClockSpeed(handle, wanted);
+    int set_err = M6II_SdChangeClockSpeed(M6II_SD_DEVICE, wanted);
     msleep(50);
-    int after_err = M6II_SdCARDGetSpeed(handle, &after_speed, &after_clock);
+    int after_err = M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &after_speed, &after_clock);
 
     DryosDebugMsg(0, 15,
                   "M6II SD clock: %d/%d -> sel %d ret=%d -> %d/%d get=%d",
@@ -314,8 +295,8 @@ static struct menu_entry m6ii_sd_test_menu[] =
                 .name = "Read speed / clock",
                 .select = m6ii_sd_read_speed,
                 .icon_type = IT_ACTION,
-                .help = "Call Canon SdCARDGetSpeed on the live M6II SD driver.",
-                .help2 = "Stock UHS-I SDR104 is expected to report speed=3 clock=9.",
+                .help = "Call Canon SdCARDGetSpeed for SD device 0.",
+                .help2 = "Read-only. Stock SDR104 is expected to report speed=3 clock=9.",
             },
             {
                 .name = "Test clock: 156 MHz",
