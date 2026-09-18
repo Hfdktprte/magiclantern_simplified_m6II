@@ -3455,7 +3455,9 @@ void raw_video_rec_task(uint32_t card_index)
 
         if (!bit_depth_ok)
         {
-            NotifyBox(5000, "RAW bit-depth setup failed; restored 14-bit");
+            const char *why = raw_lv_bpp_error_string();
+            NotifyBox(9000, "RAW low-bit failed: %s",
+                      (why && why[0]) ? why : "unknown M6II low-bit error");
             goto cleanup;
         }
 
