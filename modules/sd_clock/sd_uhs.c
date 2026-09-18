@@ -44,6 +44,7 @@ static int sd_setup_mode_enable = 0;
 static int turned_on = 0;
 static CONFIG_INT("sd.sd_overclock", sd_overclock, 0);
 static CONFIG_INT("sd.sd_access_mode", access_mode, 1);
+CONFIG_INT("sd.m6ii_bilal_boot_test", m6ii_bilal_boot_test, 0);
 CONFIG_INT("sd.SD_PLL_clock_choice", SD_PLL_clock_choice, 0);
 CONFIG_INT("SD.enable_autotune_on_boot", is_autotune_enabled, 0);
 
