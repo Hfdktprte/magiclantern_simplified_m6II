@@ -23,8 +23,9 @@ PLATFORM_ARCH = armv7-a
 ML_BOOT_OBJ = boot-d678.o
 # Match Bilal 32dbd9c integration: platform overrides + D8 EDMAC backend only.
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/function_overrides.o edmac-d8.o
-# Temporary read-only diagnostic; not part of the RAW capture path.
+# Temporary read-only diagnostics; not part of the RAW capture path.
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_edmac_readback_probe.o
+ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/m6ii_exposure_probe.o
 
 include ../Makefile
 
