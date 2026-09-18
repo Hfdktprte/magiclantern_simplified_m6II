@@ -913,6 +913,26 @@ int fps_get_current_x1000()
 {
     if (!lv)
         return 0;
+
+#ifdef CONFIG_M6II
+    /*
+     * M6II fps-engio_per_cam.c does not yet expose real AccumH/VSize
+     * registers; its placeholder accessors return 1. Feeding those values
+     * into the generic timing math overflows and yields multi-million FPS,
+     * which breaks MLV duration/data-rate metadata and the recorder timer.
+     *
+     * Until the M6II sensor timing registers are reverse engineered, use
+     * Canon's movie-mode FPS property. NTSC integer menu rates represent
+     * the usual 1000/1001 rates (24->23.976, 30->29.970, 60->59.940).
+     */
+    if (is_movie_mode() && video_mode_fps > 0)
+    {
+        if (is_current_mode_ntsc())
+            return video_mode_fps * 1000 * 1000 / 1001;
+        return video_mode_fps * 1000;
+    }
+#endif
+
     int fps_timer = (get_fps_register_b() & 0xFFFF) + 1;
     int fps_x1000 = TIMER_TO_FPS_x1000(fps_timer);
     return fps_x1000;
