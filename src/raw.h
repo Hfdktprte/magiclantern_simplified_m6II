@@ -145,6 +145,7 @@ void raw_preview_fast_ex(void* raw_buffer, void* lv_buffer, int start_line, int 
 void raw_lv_request();
 void raw_lv_release();
 void raw_lv_request_bpp(int bpp);
+const char * raw_lv_bpp_error_string(void);
 void raw_lv_request_digital_gain(int gain); /* 4096 = 1.0, 0 = disable */
 int raw_lv_enabled();
 
