@@ -40,6 +40,7 @@
 #include "focus.h"
 #include "lvinfo.h"
 #include "powersave.h"
+#include "module.h"
 
 #include "imgconv.h"
 #include "falsecolor.h"
@@ -3623,6 +3624,34 @@ int zebra_should_run()
         !WAVEFORM_FULLSCREEN;
 }
 
+#ifdef FEATURE_RAW_ZEBRAS
+/*
+ * mlv_lite may deliberately suppress normal Global Draw while RAW recording.
+ * In that special case only, allow the stock RAW-zebra renderer to keep
+ * running.  Everything else remains gated by zebra_should_run().
+ */
+static int (*mlv_lite_raw_zebra_exception_active)(void) =
+    MODULE_FUNCTION(mlv_lite_raw_zebra_exception_active);
+
+static int raw_zebra_killgd_should_run()
+{
+    if (!mlv_lite_raw_zebra_exception_active())
+        return 0;
+
+    if (!(get_global_draw_setting() & 1))
+        return 0;
+
+    if (!lv || gui_menu_shown() || !DISPLAY_IS_ON || !bmp_is_on() || LV_PAUSED)
+        return 0;
+
+    if (!zebra_draw || !RAW_ZEBRA_ENABLE || !(zebra_rec || NOT_RECORDING))
+        return 0;
+
+    /* Keeps the existing 14-bit safety check until low-bit sampling is ported. */
+    return can_use_raw_overlays();
+}
+#endif
+
 #ifdef FEATURE_OVERLAYS_IN_PLAYBACK_MODE
 static int overlays_playback_running = 0;
 static void draw_overlays_playback()
@@ -4071,6 +4100,21 @@ livev_hipriority_task( void* unused )
         static int raw_flag = 0;
 #endif
         
+        #ifdef FEATURE_RAW_ZEBRAS
+        /*
+         * Historical Kill Global Draw stops the entire normal overlay loop.
+         * Preserve that behavior, except for one narrowly-scoped pass through
+         * ML's existing LiveView RAW-zebra renderer.
+         */
+        if (!zebra_should_run() && raw_zebra_killgd_should_run())
+        {
+            digic_zebra_cleanup();
+            BMP_LOCK( draw_zebras_raw_lv(); )
+            msleep(50);
+            continue;
+        }
+        #endif
+
         if (!zebra_should_run())
         {
             while (clearscreen == 1 && (get_halfshutter_pressed() || dofpreview)) msleep(100);
