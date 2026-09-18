@@ -1966,6 +1966,17 @@ void show_recording_status()
                 int rl_y = 40;
                 int rl_icon_width=0;
 
+#ifdef CONFIG_M6II
+                /*
+                 * M6II XIMR composition may retain previous glyph pixels
+                 * between incremental BMP updates.  Clear the small recorder
+                 * HUD area explicitly so changing timer/speed digits do not
+                 * accumulate on top of one another.
+                 */
+                bmp_fill(COLOR_BG_DARK, rl_x, rl_y,
+                         220, font_med.height + font_small.height * 2 + 14);
+#endif
+
                 /* Use the same status as the LVInfo indicator */
                 char status[16];
                 int rl_color = update_status(status, sizeof(status));
