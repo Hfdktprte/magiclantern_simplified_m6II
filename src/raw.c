@@ -105,6 +105,43 @@ static void m6ii_lowbit_write_log(uint32_t channels,
     FIO_WriteFile(f, line, len);
     FIO_CloseFile(f);
 }
+
+static void m6ii_lowbit_dump_region(const char *name, uint32_t base, uint32_t size)
+{
+    uint8_t *buf = malloc(size);
+    if (!buf) return;
+
+    memcpy(buf, (void *)base, size);
+
+    FILE *f = FIO_CreateFile(name);
+    if (f)
+    {
+        FIO_WriteFile(f, buf, size);
+        FIO_CloseFile(f);
+    }
+
+    free(buf);
+}
+
+static void m6ii_lowbit_dump_roms(void)
+{
+    static int dumped = 0;
+    if (dumped) return;
+    dumped = 1;
+
+    /*
+     * Read-only snapshots for offline disassembly/table decoding.
+     * E0580000 contains the M6II EDMAC API including:
+     *   reset_packunpack_mode @ E05805DA
+     *   edmac_set_size        @ E058096E
+     *   set_transfer_mode     @ E0580E5A
+     *
+     * E1008700 spans PackUnpack/DmacInfo-related static tables around
+     * the proven DmacInfo base E1008944.
+     */
+    m6ii_lowbit_dump_region("M6II_E058.BIN",   0xE0580000u, 0x1200u);
+    m6ii_lowbit_dump_region("M6II_TABLES.BIN",0xE1008700u, 0x1200u);
+}
 #else
 const char * raw_lv_bpp_error_string(void)
 {
@@ -3028,6 +3065,8 @@ void raw_lv_request_bpp(int bpp)
         {
             if (bpp < 14 && !m6ii_lowbit_error[0])
                 m6ii_lowbit_set_error("PackMode pointer unresolved");
+            if (bpp < 14)
+                m6ii_lowbit_dump_roms();
             give_semaphore(raw_sem);
             return;
         }
@@ -3050,6 +3089,7 @@ void raw_lv_request_bpp(int bpp)
         if (bpp < 14 && packmode_before > 2u)
         {
             m6ii_lowbit_set_error("PackMode=%08x @ %08x", packmode_before, PACK32_MODE);
+            m6ii_lowbit_dump_roms();
             give_semaphore(raw_sem);
             return;
         }
