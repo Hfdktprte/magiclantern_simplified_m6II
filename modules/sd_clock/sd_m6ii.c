@@ -4,10 +4,10 @@
 #include <dryos.h>
 #include <menu.h>
 #include <fio-ml.h>
-#include <patch.h>
 
 extern int M6II_SdCARDGetSpeed(uint32_t dev, uint32_t *speed, uint32_t *clock_selector);
-extern int M6II_SD_ReConfiguration(void);
+extern int M6II_FSUDevicePowerCycle(uint32_t storage_index);
+extern int M6II_DebugSTG_IsUHSCard(void);
 
 /*
  * M6II 1.1.1 / DIGIC 8 Bilal sd_uhs port notes.
@@ -99,90 +99,88 @@ static int m6ii_regs_match(const uint32_t *vals)
 }
 
 /*
- * Bilal's D5 code forces SDR104 before SD_ReConfiguration().
- * M6II's equivalent normal UHS-I setup calls are in SdDriverPowerOn:
+ * Bilal calls Canon's generic SD_ReConfiguration() after installing his
+ * setup hooks.  M6II has a generic FSU power-cycle wrapper at E007C8E2:
  *
- *   E00B230E  ldr r0,[r4,#0x14] ; mov r1,r5 ; SdUHS1SetAccessMode
- *   E00B2326  ldr r1,[sp,#0x10] ; ldr r0,[r4,#0x14] ; SdChangeClockSpeed
+ *   GetStgDev(storage_index)
+ *   dev->control(dev + 0x10, 0x1004, 0)
  *
- * For the stock validation only, force exactly the normal SDR104/195 values:
- * mode 3 and selector 9.  This tests Bilal's "patch setup, then reconfigure"
- * ordering without introducing any overclock preset.
+ * The same 0x1004 request is used by Canon's retry paths next to
+ * "PowerCycle Fail!!".  This is a better D8 match for Bilal's generic
+ * reconfiguration helper than calling the inner E00BA8CC routine directly.
  */
-#define M6II_FORCE_ACCESS_PATCH 0xE00B230E
-#define M6II_FORCE_CLOCK_PATCH  0xE00B2326
+#define M6II_FSU_STGDEV_TABLE      0x000066E0
+#define M6II_FSU_DRIVE_LETTER_OFF  0x000000C4
 
-static struct patch m6ii_bilal_stock_patches[] =
+static int m6ii_find_sd_storage_index(uint32_t *obj_out, uint32_t *letter_out)
 {
+    for (int i = 0; i < 2; i++)
     {
-        .addr = (uint8_t *)M6II_FORCE_ACCESS_PATCH,
-        .old_value = 0x46296960, /* ldr r0,[r4,#0x14] ; mov r1,r5 */
-        .new_value = 0x21036960, /* ldr r0,[r4,#0x14] ; movs r1,#3 */
-        .size = 4,
-        .description = "sd_clock: force SDR104 during M6II reconfig",
-        .is_instruction = 1,
-    },
-    {
-        .addr = (uint8_t *)M6II_FORCE_CLOCK_PATCH,
-        .old_value = 0x69609904, /* ldr r1,[sp,#0x10] ; ldr r0,[r4,#0x14] */
-        .new_value = 0x69602109, /* movs r1,#9 ; ldr r0,[r4,#0x14] */
-        .size = 4,
-        .description = "sd_clock: force stock selector 9 during M6II reconfig",
-        .is_instruction = 1,
-    },
-};
+        uint32_t obj = MEM(M6II_FSU_STGDEV_TABLE + i * 4);
+        if (!obj)
+            continue;
 
-static void m6ii_bilal_stock_hook_task(void *unused)
+        uint32_t letter = MEM(obj + M6II_FSU_DRIVE_LETTER_OFF) & 0xFF;
+        if (letter == 'B')
+        {
+            if (obj_out) *obj_out = obj;
+            if (letter_out) *letter_out = letter;
+            return i;
+        }
+    }
+
+    if (obj_out) *obj_out = 0;
+    if (letter_out) *letter_out = 0;
+    return -1;
+}
+
+static void m6ii_bilal_fsu_stock_task(void *unused)
 {
     uint32_t speed_before = 0xffffffff;
     uint32_t clock_before = 0xffffffff;
     uint32_t speed_after = 0xffffffff;
     uint32_t clock_after = 0xffffffff;
+    uint32_t obj = 0;
+    uint32_t letter = 0;
 
+    int idx = m6ii_find_sd_storage_index(&obj, &letter);
     int get_before = M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_before, &clock_before);
-    uint32_t state_before = MEM(0x0000E3B8);
-    uint32_t uhs_before = MEM(0x0000E3E0);
+    int uhs_before = M6II_DebugSTG_IsUHSCard();
 
-    int patch_rc = apply_patches(m6ii_bilal_stock_patches,
-                                 COUNT(m6ii_bilal_stock_patches));
-    if (patch_rc)
+    if (idx < 0)
     {
-        NotifyBox(10000, "Bilal stock hook patch failed: %d", patch_rc);
+        NotifyBox(10000, "FSU SD object not found\ntable=%08x", M6II_FSU_STGDEV_TABLE);
         m6ii_sd_test_busy = 0;
         return;
     }
 
     /*
-     * Canon's DEVICE_POWER_CYCLE helper.  Unlike the failed raw Sddom test,
-     * this runs the full SdDriverPowerOn path while our Bilal-equivalent
-     * setup hooks are already installed.
+     * Stock-only validation.  Do not alter any clock table or MMIO values.
+     * First prove that this is the D8 equivalent of Bilal's
+     * SD_ReConfiguration() and that it preserves normal SDR104/195 operation.
      */
-    int reconfig_rc = M6II_SD_ReConfiguration();
-    msleep(150);
+    int reconfig_rc = M6II_FSUDevicePowerCycle((uint32_t)idx);
+    msleep(250);
 
     int get_after = M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_after, &clock_after);
+    int uhs_after = M6II_DebugSTG_IsUHSCard();
     int live_156 = m6ii_regs_match(m6ii_canon_156);
     int live_195 = m6ii_regs_match(m6ii_canon_195);
     uint32_t divider = MEM(0xD0100604);
-    uint32_t state_after = MEM(0x0000E3B8);
-    uint32_t uhs_after = MEM(0x0000E3E0);
-
-    unpatch_memory(M6II_FORCE_CLOCK_PATCH);
-    unpatch_memory(M6II_FORCE_ACCESS_PATCH);
 
     DryosDebugMsg(0, 15,
-                  "M6II Bilal hooked stock: patch=%d rc=%d get=%d/%d %d/%d->%d/%d state=%d/%d uhs=%d/%d live156=%d live195=%d div=%d",
-                  patch_rc, reconfig_rc, get_before, get_after,
+                  "M6II Bilal FSU stock: idx=%d obj=%08x drive=%c rc=%d get=%d/%d %d/%d->%d/%d uhs=%d/%d live156=%d live195=%d div=%d",
+                  idx, obj, letter ? letter : '?', reconfig_rc,
+                  get_before, get_after,
                   speed_before, clock_before, speed_after, clock_after,
-                  state_before, state_after, uhs_before, uhs_after,
-                  live_156, live_195, divider);
+                  uhs_before, uhs_after, live_156, live_195, divider);
 
     NotifyBox(15000,
-              "Bilal hooked stock\npatch=%d rc=%d get=%d/%d\nlogical %d/%d -> %d/%d\nstate=%d->%d uhs=%d->%d\nlive156=%d live195=%d div=%d",
-              patch_rc, reconfig_rc, get_before, get_after,
+              "Bilal FSU stock\nidx=%d obj=%08x drive=%c\nrc=%d get=%d/%d\nlogical %d/%d -> %d/%d\nUHS=%d->%d live156=%d live195=%d div=%d",
+              idx, obj, letter ? letter : '?',
+              reconfig_rc, get_before, get_after,
               speed_before, clock_before, speed_after, clock_after,
-              state_before, state_after, uhs_before, uhs_after,
-              live_156, live_195, divider);
+              uhs_before, uhs_after, live_156, live_195, divider);
 
     m6ii_sd_test_busy = 0;
 }
@@ -196,8 +194,8 @@ static MENU_SELECT_FUNC(m6ii_reconfig_stock)
     }
 
     m6ii_sd_test_busy = 1;
-    task_create("m6ii_bilal_stock", 0x1c, 0x1800,
-                m6ii_bilal_stock_hook_task, 0);
+    task_create("m6ii_bilal_fsu", 0x1c, 0x1800,
+                m6ii_bilal_fsu_stock_task, 0);
 }
 
 static void m6ii_read_speed_task(void *unused)
@@ -280,8 +278,8 @@ static void m6ii_bilal_dump_task(void *unused)
      * pre-init wrapper visible in the log while its exact lifecycle is mapped.
      */
     my_fprintf(f, "\nROM anchors\n");
-    my_fprintf(f, "SD_ReConfiguration DEVICE_POWER_CYCLE helper=E00BA8CC\n");
-    my_fprintf(f, "force_access_callsite=E00B230E force_clock_callsite=E00B2326\n");
+    my_fprintf(f, "FSU generic power-cycle=E007C8E2 request=0x1004\n");
+    my_fprintf(f, "FSU StgDev table=000066E0 drive-letter offset=0xC4\n");
     my_fprintf(f, "D8 preset switch=E012BB44 writer=E012BA6C\n");
 
     FIO_CloseFile(f);
@@ -322,11 +320,11 @@ static struct menu_entry m6ii_bilal_menu[] =
                 .help2 = "Stock M6II SDR104 has tested as speed=5, clock=9.",
             },
             {
-                .name = "Validate Bilal hooked stock",
+                .name = "Validate Bilal FSU reconfig",
                 .select = m6ii_reconfig_stock,
                 .icon_type = IT_ACTION,
-                .help = "Force SDR104 + stock selector 9 in Canon setup, then power-cycle.",
-                .help2 = "Bilal ordering: patch setup first, then SD_ReConfiguration. No OC preset.",
+                .help = "Run Canon's generic FSU 0x1004 card power-cycle with stock settings.",
+                .help2 = "No patches or OC values. Validates the D8 equivalent of Bilal's SD_ReConfiguration.",
             },
             {
                 .name = "Dump Bilal UHS tables",
