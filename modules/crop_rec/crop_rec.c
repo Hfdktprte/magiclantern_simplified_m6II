@@ -30,8 +30,7 @@ static CONFIG_INT("crop.preset", crop_preset_index, 0);
 static CONFIG_INT("crop.shutter_range", shutter_range, 0);
 static CONFIG_INT("crop.m6ii.raw_preview", m6ii_raw_preview, 1);
 
-static int (*mlv_lite_render_recording_preview)(int quality) =
-    MODULE_FUNCTION(mlv_lite_render_recording_preview);
+extern WEAK_FUNC(ret_0) int mlv_lite_render_recording_preview(int quality);
 
 static struct semaphore *m6ii_preview_sem = NULL;
 static volatile int m6ii_preview_pending = 0;
