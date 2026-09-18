@@ -2258,6 +2258,14 @@ static uint8_t m6ii_edmac_raw_hook_code[8] __attribute__((aligned(4)));
 /* Used to verify that Canon's edmac_set_size path reached our hook. */
 static volatile uint32_t m6ii_edmac_raw_hook_calls = 0;
 
+/*
+ * Only let the global edmac_set_size hook alter channel 3 while MLV has
+ * deliberately switched the M6II RAW writer to 10/12-bit.  Canon reuses and
+ * reconfigures imaging paths during LiveView/movie mode transitions; changing
+ * those transient channel-3 configurations can destabilize ImageController.
+ */
+static volatile uint32_t m6ii_lowbit_pitch_active = 0;
+
 #define M6II_D8_CHANNEL_COUNT           76u
 #define M6II_PACKUNPACK_ID_BASE         0xE1008814u
 #define M6II_PACKUNPACK_INFO_BASE       0xE1008BA4u
@@ -2340,15 +2348,30 @@ static uint32_t m6ii_raw_packmode_addr(void)
 
 void edmac_raw_adjust_pitch(uint32_t channel, struct edmac_info *edmac_config)
 {
-    if (channel != M6II_RAW_EDMAC_CHANNEL || !edmac_config ||
+    if (!m6ii_lowbit_pitch_active ||
+        !m6ii_edmac_raw_patch_installed ||
+        !lv_raw_enabled || !lv ||
+        raw_info.bits_per_pixel >= 14 ||
+        raw_info.width <= 0 || raw_info.height <= 0 ||
+        channel != M6II_RAW_EDMAC_CHANNEL || !edmac_config ||
         !edmac_config->xb || !edmac_config->yb)
     {
         return;
     }
 
-    uint32_t raw_pitch_14bpp = edmac_config->xb;
-    uint32_t width = raw_pitch_14bpp * 8u / 14u;
-    uint32_t pitch = width * raw_info.bits_per_pixel / 8u;
+    /*
+     * Channel 3 is only ours when Canon is configuring the exact RAW geometry
+     * that MLV observed.  Ignore channel reuse and mode-transition geometry.
+     */
+    uint32_t raw_pitch_14bpp = raw_info.width * 14u / 8u;
+    if (edmac_config->xb != raw_pitch_14bpp ||
+        edmac_config->yb + 1u != (uint32_t)raw_info.height)
+    {
+        return;
+    }
+
+    uint32_t pitch =
+        raw_info.width * raw_info.bits_per_pixel / 8u;
 
     m6ii_edmac_raw_hook_calls++;
     edmac_config->xb = pitch;
@@ -2370,17 +2393,39 @@ static void m6ii_lowbit_reset_hook_counter(void)
  */
 static int m6ii_raw_force_live_pitch(void)
 {
-    if (!m6ii_edmac_raw_patch_installed ||
+    if (!m6ii_lowbit_pitch_active ||
+        !m6ii_edmac_raw_patch_installed ||
+        !lv_raw_enabled || !lv ||
         raw_info.bits_per_pixel >= 14 ||
-        raw_info.width <= 0)
+        raw_info.width <= 0 || raw_info.height <= 0)
+    {
+        return 1;
+    }
+
+    /*
+     * Never poke the DMA geometry while Canon is between sensor/movie modes.
+     * Both the live EDMAC height and Canon's RAW state must still describe
+     * the same frame that raw_info was built from.
+     */
+    uint32_t yb_xb = raw_lv_edmac->yb_xb;
+    uint32_t live_height = (yb_xb >> 16) + 1u;
+    if (live_height != (uint32_t)raw_info.height ||
+        MEM(M6II_RAW_STATE_BASE + 0x10u) != (uint32_t)raw_info.width ||
+        MEM(M6II_RAW_STATE_BASE + 0x14u) != (uint32_t)raw_info.height)
+    {
+        return 1;
+    }
+
+    uint32_t expected_mode =
+        (raw_info.bits_per_pixel == 10) ? 0u :
+        (raw_info.bits_per_pixel == 12) ? 1u : 2u;
+    if (MEM(M6II_RAW_PACKMODE_ADDR) != expected_mode)
     {
         return 1;
     }
 
     uint32_t expected_pitch =
         raw_info.width * raw_info.bits_per_pixel / 8u;
-
-    uint32_t yb_xb = raw_lv_edmac->yb_xb;
     uint32_t actual_pitch = yb_xb & 0xFFFFu;
 
     if (actual_pitch != expected_pitch)
@@ -2606,6 +2651,8 @@ static int install_edmac_raw_patch(void)
 
 static void remove_edmac_raw_patch(void)
 {
+    m6ii_lowbit_pitch_active = 0;
+
     if (!m6ii_edmac_raw_patch_installed)
         return;
 
@@ -2973,6 +3020,10 @@ static void raw_lv_enable()
 static void raw_lv_disable()
 {
     ASSERT(!lv_raw_gain);
+#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    /* Make the global EDMAC hook inert before Canon tears LiveView down. */
+    m6ii_lowbit_pitch_active = 0;
+#endif
     lv_raw_enabled = 0;
     raw_info.buffer = 0;
 
@@ -3084,6 +3135,14 @@ void raw_lv_request_bpp(int bpp)
         m6ii_lowbit_error[0] = '\0';
 #endif
     take_semaphore(raw_sem, 0);
+
+#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    /*
+     * Keep the hook inert while PackMode/raw_info are being changed.  It is
+     * armed only for the validated low-bit writer apply below.
+     */
+    m6ii_lowbit_pitch_active = 0;
+#endif
 
     /* raw bit depth setup is done from PACK32_MODE register (mask 0x131) */
     #if defined(CONFIG_DIGIC_45)
@@ -3209,6 +3268,7 @@ void raw_lv_request_bpp(int bpp)
     raw_info.frame_size = raw_info.pitch * raw_info.height;
 
     #if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    m6ii_lowbit_pitch_active = (bpp < 14);
     int pitch_ok = m6ii_raw_apply_writer_pitch(
         bpp, (uint32_t)modes[bpp_index]);
 
@@ -3221,6 +3281,7 @@ void raw_lv_request_bpp(int bpp)
         char saved_error[sizeof(m6ii_lowbit_error)];
         snprintf(saved_error, sizeof(saved_error), "%s", m6ii_lowbit_error);
 
+        m6ii_lowbit_pitch_active = 0;
         MEM(PACK32_MODE) = MODE_14BIT;
         raw_info.bits_per_pixel = 14;
         raw_info.pitch = raw_info.width * 14 / 8;
