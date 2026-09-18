@@ -2247,6 +2247,10 @@ static int compute_dynamic_range(int black_mean, int black_stdev_x100, int white
 
 #ifdef CONFIG_RAW_LIVEVIEW
 
+#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+static int m6ii_raw_force_live_pitch(void);
+#endif
+
 static int lv_raw_enabled = 0;
 
 #ifdef CONFIG_EDMAC_RAW_SLURP
