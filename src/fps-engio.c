@@ -930,6 +930,16 @@ int fps_get_current_x1000()
     if (!lv)
         return 0;
 
+#if defined(CONFIG_M6II)
+    /*
+     * FHD29.97 and FHD59.94 expose the same A/B timer values on M6II.
+     * These registers cannot identify Canon's selected movie cadence.
+     * With FPS Override off, use Canon's precise movie-mode property.
+     */
+    if (!get_fps_override() && is_movie_mode() && video_mode_fps_x100 > 0)
+        return video_mode_fps_x100 * 10;
+#endif
+
     int fps_timer = (get_fps_register_b() & 0xFFFF) + 1;
     int fps_x1000 = TIMER_TO_FPS_x1000(fps_timer);
     return fps_x1000;

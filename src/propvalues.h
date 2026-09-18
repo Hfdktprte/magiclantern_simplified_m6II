@@ -99,6 +99,7 @@ extern int hdmi_code;
 extern int backlight_level;
 extern int video_mode_crop;
 extern int video_mode_fps;
+extern int video_mode_fps_x100; // exact Canon movie fps * 100 (e.g. 5994)
 extern int video_mode_resolution; // 0 if full hd, 1 if 720p, 2 if 480p
 extern int lv_movie_select;
 extern int sensor_cleaning;
