@@ -31,6 +31,9 @@
 // include edmac-d8.c from platform dir
 #define CONFIG_EDMAC_MEMCPY_D8
 
+/* Bilal-style low-bit RAW support: patch Canon RAW writer pitch setup. */
+#define CONFIG_EDMAC_RAW_PATCH
+
 /** Large total memory, leading to unusual memory mapping,
  * CACHEABLE / UNCACHEABLE changes
  */
