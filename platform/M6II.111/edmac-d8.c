@@ -15,7 +15,7 @@
 #define M6II_MEM2MEM_RD_CH 61u
 #define M6II_MEM2MEM_WR_CH 24u
 #define M6II_MEM2MEM_MODE  1u
-#define M6II_MEM2MEM_WAIT_MS 100u
+#define M6II_MEM2MEM_WAIT_MS 200u
 
 static uint32_t m6ii_mem2mem_resources[] = { 0x0005001Fu, 0x00050023u };
 static const uint32_t m6ii_mem2mem_devices[] = { 4u, 7u };
