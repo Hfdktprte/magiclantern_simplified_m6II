@@ -2237,9 +2237,8 @@ int _raw_lv_get_iso_post_gain()
 
 #define M6II_RAW_EDMAC_CHANNEL          3u
 #define M6II_DMACINFO_BASE              0xE1008944u
-#define M6II_PACKUNPACK_ID_BASE         (M6II_DMACINFO_BASE - 0x130u)
-#define M6II_PACKUNPACK_INFO_BASE       (M6II_DMACINFO_BASE + 0x260u)
-#define M6II_D8_CHANNEL_COUNT           76u
+#define M6II_D8_CHANNEL_COUNT_MIN       76u
+#define M6II_D8_CHANNEL_COUNT_MAX       128u
 #define M6II_EDMAC_SET_SIZE_ADDR        0xE058096Eu
 #define M6II_EDMAC_SET_SIZE_RESUME      ((M6II_EDMAC_SET_SIZE_ADDR + 8u) | 1u)
 
@@ -2247,9 +2246,38 @@ static int m6ii_edmac_raw_patch_installed = 0;
 static struct patch m6ii_edmac_raw_patches[1];
 static uint8_t m6ii_edmac_raw_hook_code[8] __attribute__((aligned(4)));
 
+static int m6ii_valid_dmacinfo_entry(uint32_t channel)
+{
+    uint32_t base = MEM(M6II_DMACINFO_BASE + channel * 8u);
+    return ((base >> 28) == 0xDu) && ((base & 0xFFu) == 0);
+}
+
+/*
+ * Earlier DIGIC-8 bodies have 76 DmacInfo entries.  M6II runtime evidence
+ * shows a valid EDMAC MMIO base (0xD0422200) where entry 76 would be, so do
+ * not inherit the old channel count.  The table is contiguous and the next
+ * structure starts with an ordinary RAM pointer, which gives us a safe
+ * read-only boundary detector.
+ */
+static uint32_t m6ii_detect_dmac_channel_count(void)
+{
+    uint32_t n = M6II_D8_CHANNEL_COUNT_MIN;
+
+    while (n < M6II_D8_CHANNEL_COUNT_MAX && m6ii_valid_dmacinfo_entry(n))
+        n++;
+
+    if (n == M6II_D8_CHANNEL_COUNT_MAX)
+    {
+        m6ii_lowbit_set_error("DmacInfo did not end before %u", M6II_D8_CHANNEL_COUNT_MAX);
+        return 0;
+    }
+
+    return n;
+}
+
 static uint32_t m6ii_raw_packmode_addr(void)
 {
-    /* Sanity-check the known RAW writer before following its PackUnpack ID. */
+    /* The proven RAW writer must still be DmacInfo channel 3. */
     uint32_t raw_mmio = MEM(M6II_DMACINFO_BASE + M6II_RAW_EDMAC_CHANNEL * 8u);
     if (raw_mmio != RAW_LV_EDMAC_CHANNEL_ADDR)
     {
@@ -2258,52 +2286,60 @@ static uint32_t m6ii_raw_packmode_addr(void)
         return 0;
     }
 
-    uint32_t puid_addr = M6II_PACKUNPACK_ID_BASE + M6II_RAW_EDMAC_CHANNEL * 4u;
+    uint32_t channels = m6ii_detect_dmac_channel_count();
+    if (!channels)
+        return 0;
+
+    /*
+     * DIGIC-8 firmware table layout:
+     *   PackUnpackId : one uint32_t per DmacInfo channel, immediately before
+     *   DmacInfo     : two uint32_t per channel
+     *   PackUnpackInfo: three uint32_t per ID, immediately after DmacInfo
+     *
+     * Derive both boundaries from the M6II's measured channel count rather
+     * than M50's fixed 76-channel offsets.
+     */
+    uint32_t puid_base = M6II_DMACINFO_BASE - channels * 4u;
+    uint32_t pui_base  = M6II_DMACINFO_BASE + channels * 8u;
+
+    uint32_t puid_addr = puid_base + M6II_RAW_EDMAC_CHANNEL * 4u;
     uint32_t puid = MEM(puid_addr);
-    if (puid >= M6II_D8_CHANNEL_COUNT)
+    if (puid >= channels)
     {
-        m6ii_lowbit_set_error("PUID=%08x @ %08x", puid, puid_addr);
+        m6ii_lowbit_set_error("N=%u PUID=%08x @ %08x", channels, puid, puid_addr);
         return 0;
     }
 
-    /*
-     * DIGIC 8 PackUnpackInfo entries are 3 words:
-     *   [0] PackMode field pointer, [1] unknown, [2] mode flags.
-     */
-    uint32_t pui_addr = M6II_PACKUNPACK_INFO_BASE + puid * 12u;
+    uint32_t pui_addr = pui_base + puid * 12u;
     uint32_t packmode = MEM(pui_addr);
+
     if (packmode & 3u)
     {
-        m6ii_lowbit_set_error("Pack ptr unaligned %08x; PUID=%u PUI=%08x",
-                              packmode, puid, pui_addr);
+        m6ii_lowbit_set_error("N=%u ptr unaligned %08x PUID=%u PUI=%08x",
+                              channels, packmode, puid, pui_addr);
+        return 0;
+    }
+
+    /* Canon PackMode fields are ordinary low RAM, not EDMAC MMIO. */
+    if (packmode < 0x1000u || packmode >= 0x01000000u)
+    {
+        m6ii_lowbit_set_error("N=%u Pack ptr %08x PUID=%u PUI=%08x",
+                              channels, packmode, puid, pui_addr);
         return 0;
     }
 
     /*
-     * M50's PackMode is low RAM (0x127B4), but do not assume the newer M6II
-     * uses the same RAM range.  Report a plausible-but-outside-old-range
-     * pointer instead of silently collapsing it into "unresolved".
+     * Before the first low-bit write, require Canon's live RAW writer to be
+     * in the exact 14-bit state Bilal found on M50.  This is both a mapping
+     * validation and a guard against writing an unrelated RAM field.
      */
-    if (packmode < 0x1000u)
+    uint32_t live_mode = MEM(packmode);
+    if (raw_info.bits_per_pixel == 14 && live_mode != 2u)
     {
-        m6ii_lowbit_set_error("Pack ptr too low %08x; PUID=%u PUI=%08x",
-                              packmode, puid, pui_addr);
+        m6ii_lowbit_set_error("N=%u PackMode=%08x @ %08x", channels, live_mode, packmode);
         return 0;
     }
 
-    if (packmode >= 0x01000000u)
-    {
-        m6ii_lowbit_set_error("Pack ptr high %08x; PUID=%u PUI=%08x",
-                              packmode, puid, pui_addr);
-        return 0;
-    }
-
-    /*
-     * Do not require the PackMode RAM value to be initialized here.
-     * raw_lv_enable() may reach this point immediately after lv_save_raw(1),
-     * before Canon has populated the live PackMode field for the first frame.
-     * The value itself is validated later, when 10/12-bit is actually requested.
-     */
     return packmode;
 }
 
