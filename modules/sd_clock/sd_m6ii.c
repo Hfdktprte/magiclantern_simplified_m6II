@@ -134,6 +134,15 @@ static uint32_t m6ii_boot_div = 0xffffffff;
 
 static void m6ii_run_startup_stock_validation(void)
 {
+    /*
+     * Make this genuinely one-shot before touching the card.  Bilal's
+     * reconfiguration is not thread-safe; if the experimental startup test
+     * hangs, the next boot must not repeat it.
+     */
+    m6ii_bilal_boot_test = 0;
+    config_save();
+    msleep(100);
+
     m6ii_boot_test_ran = 1;
     m6ii_hook_calls = 0;
     m6ii_hook_hits = 0;
@@ -151,7 +160,7 @@ static void m6ii_run_startup_stock_validation(void)
     m6ii_boot_uhs_before = M6II_DebugSTG_IsUHSCard();
 
     m6ii_boot_patch_rc = m6ii_bilal_sd_install_hook();
-    if (m6ii_boot_patch_rc == E_PATCH_OK)
+    if (m6ii_boot_patch_rc == 0)
     {
         /*
          * This is intentionally executed from module startup, matching
@@ -174,12 +183,6 @@ static void m6ii_run_startup_stock_validation(void)
                                 (uint32_t *)&m6ii_hook_last_selector);
         m6ii_bilal_sd_remove_hook();
     }
-
-    /*
-     * One-shot in RAM.  After a successful boot/shutdown, config persistence
-     * should leave this disabled for the next startup.
-     */
-    m6ii_bilal_boot_test = 0;
 
     DryosDebugMsg(0, 15,
                   "M6II Bilal boot stock: patch=%d rc=%d get=%d/%d %d/%d->%d/%d UHS=%d/%d calls=%d hits=%d last=%d/%d live195=%d div=%d",
