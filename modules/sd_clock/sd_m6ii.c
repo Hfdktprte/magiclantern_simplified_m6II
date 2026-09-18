@@ -109,7 +109,6 @@ static int m6ii_regs_match(const uint32_t *vals)
  */
 #define M6II_SD_POST_PRESET_HOOK 0xE012BEA4
 
-CONFIG_INT("sd.m6ii_bilal_boot_test", m6ii_bilal_boot_test, 0);
 
 static uint32_t m6ii_uhs_vals[11];
 
