@@ -10,7 +10,7 @@ Implement an M6 Mark II-safe crop_rec path whose first purpose is not legacy DIG
 
 1. Preview the same field of view / crop rectangle that MLV recording actually writes.
 2. Use the RAW stream rather than Canon's scaled LiveView as the framing source.
-3. Allow RAW zebras while normal Global Draw is OFF.
+3. Preserve Magic Lantern's normal Global Draw architecture: Global Draw stays ON for ML overlays, while Canon graphics are suppressed separately with the existing Kill Canon GUI / front-buffer mechanism.
 4. Work with M6II 14/12/10-bit uncompressed RAW.
 5. Preserve the existing M6II low-bit RAW EDMAC patch and its single ROM-remap page.
 
@@ -157,45 +157,66 @@ Do not derive framing from:
 Acceptance test:
 record a static scene with objects touching all four displayed borders. The extracted MLV frame must contain the same four borders at the same relative positions.
 
-## Phase 4 - RAW zebras independent of Global Draw
+## Phase 4 - use Magic Lantern's existing RAW-zebra architecture
 
-Current core behavior prevents this directly:
+Do not bypass Global Draw.
+
+Stock ML behavior is explicit:
+- `Global Draw` is the master gate for ML overlay graphics.
 - `zebra_should_run()` requires `get_global_draw()`.
-- M6II has `CONFIG_RAW_LIVEVIEW`, but `FEATURE_RAW_ZEBRAS` is currently enabled only by `CONFIG_RAW_PHOTO`.
-- the existing raw-zebra implementation is 14-bit-centric.
+- the Zebras menu itself depends on `DEP_GLOBAL_DRAW`.
+- therefore Global Draw OFF intentionally disables zebras, cropmarks and the rest of the ML overlay loop.
 
-For M6II crop_rec, implement RAW zebras as part of the preview owner instead of forcing the entire normal Global Draw pipeline on.
+The separate historical mechanism for a clean Canon screen is `CONFIG_KILL_FLICKER` / `Kill Canon GUI`. Its own source comment says it blocks Canon drawing routines while allowing ML graphics. That is the behavior wanted here.
 
-Preferred architecture:
-- preview module computes zebra state from the same RAW samples it is displaying;
-- draw zebra stripes into ML's RGBA/BMP compositor layer;
-- do not call `zebra_should_run()`;
-- Global Draw can remain OFF, so ordinary ML overlays stay hidden;
-- crop_rec-owned zebras remain visible.
+RAW zebras themselves must stay in `zebra.c`:
+- `draw_zebras()` chooses RAW zebras when `RAW_ZEBRA_ENABLE && can_use_raw_overlays()`.
+- LiveView RAW zebras are drawn by `draw_zebras_raw_lv()`.
+- it maps screen coordinates to RAW coordinates with `BM2RAW_X/Y`.
+- it samples RAW R/G/B values from the RAW buffer.
+- it writes only the zebra overlay color into ML's bitmap/RGBA overlay and mirror buffer.
 
-This is more isolated than changing the meaning of Global Draw globally.
+So the M6II implementation should extend the existing RAW overlay path rather than create crop_rec-owned zebras.
 
-Reuse the user's normal zebra thresholds if they can be exposed cleanly from zebra.c; otherwise keep local thresholds first and later add a core getter API.
+Required M6II core work:
+- enable `FEATURE_RAW_ZEBRAS` for supported `CONFIG_RAW_LIVEVIEW` cameras, not only `CONFIG_RAW_PHOTO`;
+- make `can_use_raw_overlays()` accept validated 10/12-bit M6II RAW instead of hard-rejecting non-14-bit;
+- make RAW pixel sampling helpers understand the packed 10/12/14-bit stream;
+- make crop_rec / mlv_lite set the preview rectangle so `BM2RAW_X/Y` maps to the exact MLV recording rectangle.
 
 Acceptance:
-- Global Draw OFF -> normal ML overlays disappear.
-- crop_rec RAW preview remains visible.
-- crop_rec RAW zebras remain visible.
-- turning crop_rec RAW zebras OFF leaves a clean RAW preview.
-- zebra placement follows the RAW recording crop, not Canon preview coordinates.
+- Global Draw LiveView/ON -> ML overlay task runs normally.
+- Kill Canon GUI -> Canon bitmap graphics disappear while ML graphics remain.
+- RAW zebras use the stock Zebras menu and stock zebra drawing loop.
+- zebra positions correspond to the exact recorded RAW rectangle.
+- disabling Global Draw disables the RAW zebras too, exactly like normal Magic Lantern.
 
-## Phase 5 - clean Canon image / UI interaction
+## Phase 5 - clean Canon GUI while preserving ML overlays
 
-Do not use CONFIG_DISPLAY_FILTERS as the first M6II implementation. Current display-filter redirection is camera-specific and has no established M6II redirect implementation.
+Port/enable the existing Kill Canon GUI behavior on M6II only after verifying the front-buffer primitives on this camera.
 
-Instead:
-- render after a completed M6II EVF/VSYNC event in a normal worker;
-- target the current panel image buffer;
-- use the existing dedicated ML RGBA compositor for zebra/UI pixels.
+The existing ML flow is:
+- Global Draw remains enabled.
+- `idle_kill_flicker()` disables Canon's GUI front buffer and clears stale Canon bitmap graphics.
+- the zebra/global-draw task continues drawing ML graphics.
+- when Canon UI must return, `idle_stop_killing_flicker()` re-enables the Canon front buffer.
 
-If Canon rewrites the panel between renders, preview cadence should be controlled by the worker and coalesced to the newest frame rather than adding more hooks.
+Do not replace this with Global Draw OFF.
 
-If the user later wants Canon GUI suppression, implement it separately from Global Draw. Do not mix "hide Canon UI", "disable ML Global Draw", and "replace Canon image plane" into one flag.
+M6II currently does not define `CONFIG_KILL_FLICKER`, so first verify that:
+- `canon_gui_disable_front_buffer()`,
+- `canon_gui_enable_front_buffer()`,
+- `canon_gui_front_buffer_disabled()`
+
+operate correctly with the M6II XCM/WINSYS implementation.
+
+Only after that verification should `CONFIG_KILL_FLICKER` be enabled for M6II.
+
+The RAW image-plane preview and Canon bitmap GUI suppression are separate concerns:
+- RAW preview controls the image/FOV.
+- Kill Canon GUI controls Canon's graphics layer.
+- Global Draw controls ML overlays.
+- RAW zebras remain part of ML overlays.
 
 ## Phase 6 - recording-time performance
 
@@ -261,6 +282,7 @@ The first build is considered successful when, on ordinary Canon FHD mode:
 - MLV Lite can be set to a cropped RAW recording resolution such as 1920x1080.
 - M6II screen shows a RAW-derived preview whose borders exactly match the recorded MLV frame.
 - 14/12/10-bit each display correctly.
-- Global Draw can be OFF.
-- RAW zebras can still be enabled by crop_rec.
+- Global Draw is ON for LiveView/ML overlays.
+- Kill Canon GUI can suppress Canon bitmap graphics without suppressing ML RAW zebras.
+- RAW zebras are the normal Magic Lantern RAW-zebra implementation, not a crop_rec-private renderer.
 - RAW recording remains functional and unchanged.
