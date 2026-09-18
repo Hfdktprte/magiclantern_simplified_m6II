@@ -6,6 +6,7 @@ on:
       - m6ii-raw-probe-v1
       - m6ii-bilal-fps-v1
       - m6ii-bilal-10-12bit-v1
+      - m6ii-sd-clock-test-v1
   workflow_dispatch:
 
 jobs:
