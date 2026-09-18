@@ -672,12 +672,18 @@ static unsigned int sd_uhs_init()
         return init_SD_PLL();
 
     /*
-     * M6II has one MMU ROM-remap page. This RAW branch reserves it for the
-     * 10/12-bit EDMAC pitch hook. Keep the M6II SD hook on the separate
-     * sd-test branch; never install it from this RAW branch.
+     * M6II has one MMU ROM-remap page.  A build that enables the low-bit RAW
+     * EDMAC patch reserves that page for RAW; an SD-focused build without
+     * CONFIG_EDMAC_RAW_PATCH remains free to use the M6II sd_clock port.
      */
     if (is_camera("M6II", "1.1.1"))
+    {
+#ifdef CONFIG_EDMAC_RAW_PATCH
         return 0;
+#else
+        return init_SD_M6II();
+#endif
+    }
 
     // This cam has a DryOS func to autotune SD speed at runtime.
     // Doesn't need a restart.
