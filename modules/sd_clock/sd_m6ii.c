@@ -6,7 +6,8 @@
 #include <fio-ml.h>
 
 extern int M6II_SdCARDGetSpeed(uint32_t dev, uint32_t *speed, uint32_t *clock_selector);
-extern int M6II_SD_ReConfiguration(void);
+extern int M6II_SddomTerminate(uint32_t dev);
+extern int M6II_SddomInitialize(uint32_t dev);
 
 /*
  * M6II 1.1.1 / DIGIC 8 Bilal sd_uhs port notes.
@@ -110,22 +111,21 @@ static void m6ii_bilal_reconfig_task(void *arg)
     M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_before, &clock_before);
 
     if (mode == 1)
-    {
-        /*
-         * Bilal-style D8 adaptation:
-         * supply our uhs_vals to Canon's normal setup/preset writer,
-         * then invoke the camera's full SD reconfiguration path.
-         * We use Canon's own 156 MHz array for the first validation.
-         */
         m6ii_copy_words(sel9, m6ii_canon_156, 11);
-    }
     else
-    {
-        /* Ensure stock selector-9 contents before a stock-only validation. */
         m6ii_copy_words(sel9, m6ii_canon_195, 11);
-    }
 
-    int rc = M6II_SD_ReConfiguration();
+    /*
+     * DIGIC-8 equivalent of Bilal's SD_ReConfiguration at the Sddom layer:
+     * terminate the active controller/card state, then run the complete
+     * Sddom initialization sequence for device 0.
+     *
+     * 0xE0178978 explicitly performs:
+     *   SddomSetPiass -> SddomHWInit -> SddomSWInit ->
+     *   SddomCARDSetUHSMode -> SddomCARDInitialize -> SddomCARDGetSpeed.
+     */
+    int term_rc = M6II_SddomTerminate(M6II_SD_DEVICE);
+    int init_rc = M6II_SddomInitialize(M6II_SD_DEVICE);
     msleep(150);
 
     uint32_t speed_after = 0xffffffff, clock_after = 0xffffffff;
@@ -134,23 +134,18 @@ static void m6ii_bilal_reconfig_task(void *arg)
     int live_195 = m6ii_regs_match(m6ii_canon_195);
     uint32_t divider = MEM(0xD0100604);
 
-    /*
-     * Restore Canon's selector-9 RAM table immediately.  This does not alter
-     * the just-programmed controller state; any later Canon reconfiguration
-     * or reboot will therefore use the original 195 MHz preset.
-     */
     m6ii_copy_words(sel9, saved, 11);
 
     DryosDebugMsg(0, 15,
-                  "M6II Bilal reconfig: mode=%d rc=%d %d/%d -> %d/%d get=%d live156=%d live195=%d div=%d",
-                  mode, rc, speed_before, clock_before, speed_after, clock_after,
-                  get_rc, live_156, live_195, divider);
+                  "M6II Bilal reconfig: mode=%d term=%d init=%d %d/%d -> %d/%d get=%d live156=%d live195=%d div=%d",
+                  mode, term_rc, init_rc, speed_before, clock_before,
+                  speed_after, clock_after, get_rc, live_156, live_195, divider);
 
     NotifyBox(12000,
-              "Bilal reconfig %s\nrc=%d get=%d\nlogical %d/%d -> %d/%d\nlive156=%d live195=%d D0100604=%d",
+              "Bilal Sddom %s\nterm=%d init=%d get=%d\nlogical %d/%d -> %d/%d\nlive156=%d live195=%d D0100604=%d",
               mode ? "156 test" : "stock",
-              rc, get_rc, speed_before, clock_before, speed_after, clock_after,
-              live_156, live_195, divider);
+              term_rc, init_rc, get_rc, speed_before, clock_before,
+              speed_after, clock_after, live_156, live_195, divider);
 
     m6ii_sd_test_busy = 0;
 }
@@ -261,8 +256,7 @@ static void m6ii_bilal_dump_task(void *unused)
      * pre-init wrapper visible in the log while its exact lifecycle is mapped.
      */
     my_fprintf(f, "\nROM anchors\n");
-    my_fprintf(f, "DebugSTG_SDPreInit wrapper=E00BC9B2 target=E057D6D4\n");
-    my_fprintf(f, "SddomChangeClockSpeed wrapper=E017879C low=E00F4770\n");
+    my_fprintf(f, "SddomTerminate=E01786B4 SddomInitialize=E0178978\n");
     my_fprintf(f, "D8 preset switch=E012BB44 writer=E012BA6C\n");
 
     FIO_CloseFile(f);
@@ -306,15 +300,15 @@ static struct menu_entry m6ii_bilal_menu[] =
                 .name = "Validate stock reconfigure",
                 .select = m6ii_reconfig_stock,
                 .icon_type = IT_ACTION,
-                .help = "Run Canon's full SD reconfiguration with untouched stock 195 preset.",
-                .help2 = "First validation of the M6II equivalent of Bilal's SD_ReConfiguration().",
+                .help = "Run M6II Sddom terminate/init using the untouched stock 195 preset.",
+                .help2 = "Validates Bilal-style reconfiguration without changing the clock preset.",
             },
             {
                 .name = "Validate Bilal path: 156",
                 .select = m6ii_bilal_validate_156,
                 .icon_type = IT_ACTION,
-                .help = "Feed Canon's known-good 156MHz array through the Bilal preset/reconfigure path.",
-                .help2 = "No guessed OC values. Selector-9 RAM table is restored immediately after reinit.",
+                .help = "Feed Canon's known-good 156MHz array through the Sddom Bilal path.",
+                .help2 = "Do not run until the stock Sddom reconfiguration test passes.",
             },
             {
                 .name = "Dump Bilal UHS tables",
