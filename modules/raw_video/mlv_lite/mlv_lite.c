@@ -83,6 +83,15 @@ THREAD_ROLE(ShootTask);             /* polling CBR */
 static GUARDED_BY(GuiMainTask) int show_graph = 0;
 static GUARDED_BY(GuiMainTask) int show_edmac = 0;
 
+#ifdef CONFIG_M6II
+/*
+ * raw_lv_redirect_edmac() points Canon's channel-3 RAW writer at MLV's
+ * full-size buffers while recording.  Put it back on raw_info.buffer from
+ * LiveViewTask/vsync before cleanup changes bit depth or releases memory.
+ */
+static volatile int m6ii_raw_dma_redirected = 0;
+#endif
+
 /* from mlv_play module */
 extern WEAK_FUNC(ret_0) void mlv_play_file(char *filename);
 
@@ -2968,12 +2977,42 @@ unsigned int FAST raw_rec_vsync_cbr(unsigned int unused)
     /* panning window is updated when recording, but also when not recording */
     panning_update();
 
-    if (!RAW_IS_RECORDING) return 0;
-    if (!raw_lv_settings_still_valid()) { raw_recording_state = RAW_FINISHING; return 0; }
+    if (!RAW_IS_RECORDING)
+    {
+#ifdef CONFIG_M6II
+        if (RAW_IS_FINISHING && m6ii_raw_dma_redirected && raw_info.buffer)
+        {
+            /*
+             * Do the final address handoff at a real frame boundary.  This is
+             * the same context used for all recording redirects and avoids
+             * changing channel 3 from RawRecTask while ImageController owns it.
+             */
+            raw_lv_redirect_edmac((void *)raw_info.buffer);
+            m6ii_raw_dma_redirected = 0;
+        }
+#endif
+        return 0;
+    }
+
+    if (!raw_lv_settings_still_valid())
+    {
+        raw_recording_state = RAW_FINISHING;
+#ifdef CONFIG_M6II
+        if (m6ii_raw_dma_redirected && raw_info.buffer)
+        {
+            raw_lv_redirect_edmac((void *)raw_info.buffer);
+            m6ii_raw_dma_redirected = 0;
+        }
+#endif
+        return 0;
+    }
     if (buffer_full) return 0;
     
     /* double-buffering */
     raw_lv_redirect_edmac(fullsize_buffers[fullsize_buffer_pos % 2]);
+#ifdef CONFIG_M6II
+    m6ii_raw_dma_redirected = 1;
+#endif
 
     /* advance to next buffer for the upcoming capture */
     int next_fullsize_buffer_pos = (fullsize_buffer_pos + 1) % 2;
@@ -3963,13 +4002,31 @@ cleanup:
         take_semaphore(settings_sem, 0);
 #ifdef CONFIG_M6II
         /*
-         * Channel 3 is redirected into fullsize_buffers while recording.
-         * Restore Canon's RAW destination and 14-bit writer first; the M6II
-         * raw core waits for the new writer geometry to settle.  Only then is
-         * it safe to release the buffers Canon may have been DMA-writing.
+         * Give LiveViewTask a few frame boundaries to hand channel 3 back to
+         * Canon's raw_info.buffer.  Do not perform the address switch here:
+         * the M6II ImageController is sensitive to channel changes made while
+         * its LiveView state machine is transitioning.
          */
-        restore_bit_depth();
-        free_buffers();
+        for (int i = 0; i < 4 && m6ii_raw_dma_redirected && lv; i++)
+        {
+            wait_lv_frames(1);
+        }
+
+        if (!m6ii_raw_dma_redirected)
+        {
+            /* Writer no longer targets MLV memory: 14-bit reset/free is safe. */
+            restore_bit_depth();
+            free_buffers();
+        }
+        else
+        {
+            /*
+             * Fail safe: keep the buffers alive rather than free memory that
+             * channel 3 may still own.  The next stable RAW/LV transition can
+             * reclaim them; leaking a suite is preferable to ERR70/corruption.
+             */
+            NotifyBox(5000, "RAW stop: DMA handoff pending");
+        }
 #else
         free_buffers();
         restore_bit_depth();
