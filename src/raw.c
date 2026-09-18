@@ -35,6 +35,8 @@
 
 #ifdef CONFIG_EDMAC_RAW_PATCH
 #include "patch.h"
+/* patch.h has its own local debug macro; raw.c defines its own below. */
+#undef dbg_printf
 #endif
 
 #undef RAW_DEBUG        /* define it to help with porting */
