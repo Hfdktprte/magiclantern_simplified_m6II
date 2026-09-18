@@ -363,11 +363,6 @@ static volatile                 uint32_t skip_frames = 0;
 
 /* for compress_task */
 static struct msg_queue * compress_mq = 0;
-#ifdef CONFIG_M6II
-/* Stop handshake: raw_rec_task must not flush/free buffers until the
- * compression task has completed the final native Esub5 copy and unlock. */
-static volatile int m6ii_compress_stop_done = 1;
-#endif
 
 static GUARDED_BY(RawRecTask)   mlv_file_hdr_t file_hdr[CARD_COUNT];
 static GUARDED_BY(RawRecTask)   mlv_rawi_hdr_t rawi_hdr;
@@ -1971,17 +1966,6 @@ void show_recording_status()
                 int rl_y = 40;
                 int rl_icon_width=0;
 
-#ifdef CONFIG_M6II
-                /*
-                 * M6II XIMR composition may retain previous glyph pixels
-                 * between incremental BMP updates.  Clear the small recorder
-                 * HUD area explicitly so changing timer/speed digits do not
-                 * accumulate on top of one another.
-                 */
-                bmp_fill(COLOR_BG_DARK, rl_x, rl_y,
-                         220, font_med.height + font_small.height * 2 + 14);
-#endif
-
                 /* Use the same status as the LVInfo indicator */
                 char status[16];
                 int rl_color = update_status(status, sizeof(status));
@@ -2749,20 +2733,6 @@ static void compress_task()
         {
             /* stop_recording */
 
-#ifdef CONFIG_M6II
-            /*
-             * The final frame message may have started an asynchronous native
-             * Esub5 copy immediately before this stop message.  Do not tear
-             * the engine down underneath that DMA.
-             */
-            int m6ii_wait = 0;
-            while (edmac_active && m6ii_wait < 1500)
-            {
-                msleep(1);
-                m6ii_wait++;
-            }
-#endif
-
             if (OUTPUT_COMPRESSION == 0)
             {
                 /* exclusive edmac access no longer needed */
@@ -2772,9 +2742,6 @@ static void compress_task()
 
             edmac_stop_spy();
 
-#ifdef CONFIG_M6II
-            m6ii_compress_stop_done = 1;
-#endif
             continue;
         }
 
@@ -3503,9 +3470,6 @@ void raw_video_rec_task(uint32_t card_index)
         /* signal start of recording to the compression task */
         // FIXME SJE let's not use INT_MAX as a signal with meaning,
         // it's lazy and deceptive.  We should probably use an enum instead.
-#ifdef CONFIG_M6II
-        m6ii_compress_stop_done = 0;
-#endif
         msg_queue_post(compress_mq, INT_MAX);
 
         /* fake recording status, to integrate with other ml stuff (e.g. hdr video */
@@ -3839,43 +3803,15 @@ abort_and_check_early_stop:
     /* signal end of recording to the compression task */
     msg_queue_post(compress_mq, INT_MIN);
 
-#ifdef CONFIG_M6II
-    /*
-     * Wait until compress_task has drained the final frame, observed its DMA
-     * completion callback and released Esub5.  Without this handshake, the
-     * raw task can flush/free the last slot while DMA is still using it.
-     */
-    int m6ii_stop_wait = 0;
-    while (!m6ii_compress_stop_done && m6ii_stop_wait < 2000)
-    {
-        msleep(1);
-        m6ii_stop_wait++;
-    }
-    if (!m6ii_compress_stop_done)
-    {
-        NotifyBox(5000, "M6II Esub5 stop timeout; reboot before REC");
-        printf("M6II: Esub5 stop handshake timeout\n");
-    }
-#endif
-
     set_recording_custom(CUSTOM_RECORDING_NOT_RECORDING);
 
     if (!RECORDING_H264 && card_index == 0)
     {
         /* faster writing speed that way */
-#ifndef CONFIG_M6II
         PauseLiveView();
 
         /* PauseLiveView breaks UI locks - why? */
         gui_uilock(UILOCK_EVERYTHING);
-#else
-        /*
-         * M6II is an always-LiveView mirrorless port and does not yet have a
-         * platform-proven PauseLiveView/ResumeLiveView pair. Keep Canon LV
-         * running while final RAW buffers and the MLV header are flushed.
-         */
-        DryosDebugMsg(0, 15, "M6II RAW stop: skipping PauseLiveView");
-#endif
     }
 
     /* write all queued blocks, if any */
@@ -3958,20 +3894,6 @@ abort_and_check_early_stop:
                 }
             }
 
-#ifdef CONFIG_M6II
-            /*
-             * M6II bring-up: continuous grouped writes are proven good, but
-             * shutdown consistently stalls on the final single queued frame.
-             * Drop only this tail frame on stop so the file can close cleanly.
-             * At 23.976p this sacrifices at most ~42 ms of footage.
-             */
-            DryosDebugMsg(0, 15,
-                "M6II RAW stop: dropping tail slot=%d frame=%d size=%d status=%d",
-                slot_index, slots[slot_index].frame_number,
-                slots[slot_index].size, slots[slot_index].status);
-            free_slot(slot_index);
-            continue;
-#else
             slots[slot_index].status = SLOT_WRITING;
 
             if (indicator_display == INDICATOR_RAW_BUFFER) show_buffer_status();
@@ -3983,7 +3905,6 @@ abort_and_check_early_stop:
                 break;
             }
             free_slot(slot_index);
-#endif
         }
     }
 
@@ -3997,16 +3918,8 @@ abort_and_check_early_stop:
     }
 
 cleanup:
-#ifdef CONFIG_M6II
-    NotifyBox(1200, "M6II stop: closing MLV");
-    DryosDebugMsg(0, 15, "M6II RAW stop: finish_chunk begin");
-#endif
     if (f)
         finish_chunk(f, card_index);
-#ifdef CONFIG_M6II
-    NotifyBox(1200, "M6II stop: MLV closed");
-    DryosDebugMsg(0, 15, "M6II RAW stop: finish_chunk done");
-#endif
     if (!written_total[card_index]
         && raw_movie_filename != NULL)
     {
@@ -4016,18 +3929,10 @@ cleanup:
 
     if (card_index == 0) // avoid cleaning up twice on dual slot cams
     {
-#ifdef CONFIG_M6II
-        NotifyBox(1200, "M6II stop: freeing buffers");
-        DryosDebugMsg(0, 15, "M6II RAW stop: free_buffers begin");
-#endif
         take_semaphore(settings_sem, 0);
         free_buffers();
         restore_bit_depth();
         give_semaphore(settings_sem);
-#ifdef CONFIG_M6II
-        NotifyBox(1200, "M6II stop: buffers free");
-        DryosDebugMsg(0, 15, "M6II RAW stop: free_buffers done");
-#endif
 
         /* everything saved, we can unlock the buttons */
         gui_uilock(UILOCK_NONE);
@@ -4050,16 +3955,10 @@ cleanup:
             printf("H.264 stopped.\n");
         }
 
-#ifndef CONFIG_M6II
         ResumeLiveView();
-#endif
         redraw();
         raw_recording_state = RAW_IDLE;
         mlv_rec_call_cbr(MLV_REC_EVENT_STOPPED, NULL);
-#ifdef CONFIG_M6II
-        NotifyBox(3000, "M6II RAW stop complete");
-        DryosDebugMsg(0, 15, "M6II RAW stop: IDLE");
-#endif
     }
 }
 
