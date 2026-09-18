@@ -3961,6 +3961,10 @@ cleanup:
     if (card_index == 0) // avoid cleaning up twice on dual slot cams
     {
         take_semaphore(settings_sem, 0);
+#ifdef CONFIG_M6II
+        if (fullsize_buffers[1])
+            raw_lv_redirect_edmac(fullsize_buffers[1]);
+#endif
         free_buffers();
         restore_bit_depth();
         give_semaphore(settings_sem);
