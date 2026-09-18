@@ -201,18 +201,18 @@ static void m6ii_sd_dump_task(void *unused)
      * sd_device[1].  Only read the four established device fields.
      */
     struct m6ii_sd_device *dev = sd_device[1];
-    my_fprintf(f, "sd_device table @ %p\n", sd_device);
-    my_fprintf(f, "sd_device[1]=%p\n", dev);
+    my_fprintf(f, "sd_device table=%08x\n", (uint32_t)sd_device);
+    my_fprintf(f, "sd_device[1]=%08x\n", (uint32_t)dev);
     if (dev)
     {
-        my_fprintf(f, "read_block=%p\n", dev->read_block);
-        my_fprintf(f, "write_block=%p\n", dev->write_block);
-        my_fprintf(f, "io_control=%p\n", dev->io_control);
-        my_fprintf(f, "soft_reset=%p\n", dev->soft_reset);
+        my_fprintf(f, "read_block=%08x\n", (uint32_t)dev->read_block);
+        my_fprintf(f, "write_block=%08x\n", (uint32_t)dev->write_block);
+        my_fprintf(f, "io_control=%08x\n", (uint32_t)dev->io_control);
+        my_fprintf(f, "soft_reset=%08x\n", (uint32_t)dev->soft_reset);
 
         uint32_t *w = (uint32_t *)dev;
         for (int i = 0; i < 16; i++)
-            my_fprintf(f, "dev[%02d]=%#010x\n", i, w[i]);
+            my_fprintf(f, "dev[%02d]=%08x\n", i, w[i]);
     }
 
     FIO_CloseFile(f);
@@ -275,23 +275,6 @@ static void m6ii_sd_mode_task(void *unused)
     m6ii_sd_test_busy = 0;
 }
 
-static void m6ii_sd_sdr_task(void *arg)
-{
-    int mode = (int)(uintptr_t)arg;
-
-    /*
-     * M6II ROM 1.1.1 exposes DebugSTG_SetSDRMode.
-     * We intentionally use Canon's own DIGIC 8 storage path here.
-     * No DIGIC 5 0xC04006xx register writes are performed.
-     */
-    int err = call("DebugSTG_SetSDRMode", mode);
-
-    DryosDebugMsg(0, 15, "M6II SD: DebugSTG_SetSDRMode(%d) -> %d", mode, err);
-    NotifyBox(6000, "Canon storage mode %d: ret=%d", mode, err);
-
-    m6ii_sd_test_busy = 0;
-}
-
 static MENU_SELECT_FUNC(m6ii_sd_read_mode)
 {
     if (m6ii_sd_test_busy)
@@ -302,29 +285,6 @@ static MENU_SELECT_FUNC(m6ii_sd_read_mode)
 
     m6ii_sd_test_busy = 1;
     task_create("m6ii_sd_mode", 0x1c, 0x1000, m6ii_sd_mode_task, 0);
-}
-
-static void m6ii_sd_start_sdr_mode(int mode)
-{
-    if (m6ii_sd_test_busy)
-    {
-        NotifyBox(2000, "SD test already running");
-        return;
-    }
-
-    m6ii_sd_test_busy = 1;
-    NotifyBox(3000, "Testing Canon storage mode %d", mode);
-    task_create("m6ii_sd_sdr", 0x1c, 0x1000, m6ii_sd_sdr_task, (void *)(uintptr_t)mode);
-}
-
-static MENU_SELECT_FUNC(m6ii_sd_sdr_mode_0)
-{
-    m6ii_sd_start_sdr_mode(0);
-}
-
-static MENU_SELECT_FUNC(m6ii_sd_sdr_mode_1)
-{
-    m6ii_sd_start_sdr_mode(1);
 }
 
 static struct menu_entry m6ii_sd_test_menu[] =
