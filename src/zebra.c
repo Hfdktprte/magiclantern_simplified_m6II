@@ -620,6 +620,11 @@ hist_build()
 static CONFIG_INT("raw.zebra", raw_zebra_enable, 2); /* 1 = always, 2 = photo only */
 #define RAW_ZEBRA_ENABLE (raw_zebra_enable == 1 || (raw_zebra_enable == 2 && !lv))
 
+#if defined(CONFIG_M6II)
+static int (*mlv_lite_get_recording_rect)(int *, int *, int *, int *, int *) =
+    MODULE_FUNCTION(mlv_lite_get_recording_rect);
+#endif
+
 static void FAST draw_zebras_raw()
 {
     if (!DISPLAY_IS_ON) return;
@@ -803,6 +808,20 @@ void FAST zebra_highlight_raw_advanced(struct raw_highlight_info * raw_highlight
 static void FAST draw_zebras_raw_lv()
 {
     if (!raw_update_params()) return;
+
+#if defined(CONFIG_M6II)
+    /*
+     * raw_update_params() restores Canon's normal preview mapping. For M6II
+     * RAW video, immediately replace it with the exact rectangle mlv_lite is
+     * recording so BM2RAW_X/Y and the visible RAW preview agree.
+     */
+    int rec_x, rec_y, rec_w, rec_h, rec_bpp;
+    if (mlv_lite_get_recording_rect(&rec_x, &rec_y, &rec_w, &rec_h, &rec_bpp))
+    {
+        raw_set_preview_rect(rec_x, rec_y, rec_w, rec_h, 1);
+        raw_force_aspect_ratio(0, 0);
+    }
+#endif
 
 #ifdef FEATURE_VRAM_RGBA
     /* D8 compositor: indexed ML buffer is converted to the RGBA layer later. */
@@ -1173,7 +1192,11 @@ static int zebra_digic_dirty = 0;
 
 static void draw_zebras( int Z )
 {
+#ifdef FEATURE_VRAM_RGBA
+    uint8_t * const bvram = bmp_vram();
+#else
     uint8_t * const bvram = bmp_vram_real();
+#endif
     int zd = Z && zebra_draw && (lv_luma_is_accurate() || PLAY_OR_QR_MODE) && (zebra_rec || NOT_RECORDING); // when to draw zebras
     if (zd)
     {
@@ -1256,6 +1279,9 @@ static void draw_zebras( int Z )
                 }
             }
 
+#ifdef FEATURE_VRAM_RGBA
+            ml_refresh_display_needed = 1;
+#endif
             return;
         }
         #endif
@@ -1417,6 +1443,10 @@ static void draw_zebras( int Z )
             }
         }
     }
+
+#ifdef FEATURE_VRAM_RGBA
+    ml_refresh_display_needed = 1;
+#endif
 }
 #endif
 
