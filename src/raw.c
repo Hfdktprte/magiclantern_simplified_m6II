@@ -2593,6 +2593,19 @@ m6ii_raw_writer_set_size_hook(void)
 
 static int install_edmac_raw_patch(void)
 {
+    /*
+     * RECOVERY GUARD:
+     * The first M6II build using the writer-call-site trampoline froze on
+     * camera/RAW startup.  Do not install any EDMAC code hook until that
+     * trampoline is validated offline.  14-bit RAW remains usable; requests
+     * for 10/12-bit will fail safely because m6ii_edmac_raw_patch_installed
+     * stays clear.
+     */
+    m6ii_lowbit_pitch_active = 0;
+    m6ii_edmac_raw_patch_installed = 0;
+    return 1;
+
+#if 0
     if (m6ii_edmac_raw_patch_installed)
         return 0;
 
@@ -2649,6 +2662,7 @@ static int install_edmac_raw_patch(void)
 
     m6ii_edmac_raw_patch_installed = 1;
     return 0;
+#endif
 }
 
 static void remove_edmac_raw_patch(void)
