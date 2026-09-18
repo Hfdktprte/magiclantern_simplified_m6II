@@ -19,6 +19,13 @@
 #define BGMT_PLAY                    0x12 // I think?
 #define BGMT_TRASH                   0x21 // map to M-fn for now
 
+/* SwLvMovieStartButtonCBR in M6II 1.1.1 firmware:
+ * callback state 1 (press)   -> GUI event 0x2C
+ * callback state 0 (release) -> GUI event 0x2D
+ */
+#define BGMT_REC                     0x2C
+#define BGMT_UNPRESS_REC             0x2D
+
 #define BGMT_PRESS_RIGHT             0x3B
 #define BGMT_UNPRESS_RIGHT           0x3C
 #define BGMT_PRESS_LEFT              0x3D
