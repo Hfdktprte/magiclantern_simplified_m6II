@@ -25,6 +25,7 @@ ML_BOOT_OBJ = boot-d678.o
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/function_overrides.o edmac-d8.o
 # Temporary read-only diagnostics; not part of the RAW capture path.
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/raw_edmac_readback_probe.o
+ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/fps_timing_probe.o
 
 include ../Makefile
 
