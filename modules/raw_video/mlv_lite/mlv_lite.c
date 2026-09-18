@@ -401,6 +401,98 @@ static GUARDED_BY(settings_sem) struct memSuite * srm_mem_suite = 0;
 static GUARDED_BY(settings_sem) void * fullsize_buffers[2];         /* original image, before cropping, double-buffered */
 static GUARDED_BY(LiveViewTask) int fullsize_buffer_pos = 0;        /* which of the full size buffers (double buffering) is currently in use */
 
+#if defined(CONFIG_M6II)
+/*
+ * M6II has a dedicated ML RGBA compositor layer. Render a low-cost grayscale
+ * RAW framing preview into ML's indexed staging buffer (and its mirror);
+ * bmp.c then converts that buffer to the dedicated RGBA layer.
+ *
+ * Keeping the mirror in sync is important: stock RAW zebras use it to decide
+ * which pixels belong to ML and are safe to overwrite.
+ */
+int mlv_lite_render_recording_preview_bmp(void)
+{
+    if (!settings_sem || !raw_video_enabled || !lv || !raw_lv_is_enabled())
+        return 0;
+
+    if (raw_info.bits_per_pixel != 14 &&
+        raw_info.bits_per_pixel != 12 &&
+        raw_info.bits_per_pixel != 10)
+        return 0;
+
+    take_semaphore(settings_sem, 0);
+
+    int ok = (res_x > 0 && res_y > 0 && raw_info.buffer);
+    if (!ok)
+    {
+        give_semaphore(settings_sem);
+        return 0;
+    }
+
+    raw_set_preview_rect(skip_x, skip_y, res_x, res_y, 1);
+    raw_force_aspect_ratio(0, 0);
+
+    static int fi = 0;
+    fi = !fi;
+    void *src = raw_info.buffer;
+    if (RAW_IS_RECORDING && fullsize_buffers[fi])
+        src = fullsize_buffers[fi];
+
+    uint8_t *bvram = bmp_vram();
+    uint8_t *mirror = get_bvram_mirror();
+    if (!bvram || !mirror)
+    {
+        give_semaphore(settings_sem);
+        return 0;
+    }
+
+    int black = raw_info.black_level;
+    int white = raw_info.white_level;
+    if (white > 16383) white = 15000;
+    if (white <= black + 16) white = black + 16;
+    int range = white - black;
+
+    BMP_LOCK(
+        for (int y = os.y0; y < os.y_max; y += 2)
+        {
+            int ry = BM2RAW_Y(y) & ~1;
+            ry = COERCE(ry, 0, raw_info.height - 2);
+
+            for (int x = os.x0; x < os.x_max; x += 2)
+            {
+                int rx = BM2RAW_X(x) & ~1;
+                rx = COERCE(rx, 0, raw_info.width - 2);
+
+                int s =
+                    raw_get_pixel_ex(src, rx,     ry) +
+                    raw_get_pixel_ex(src, rx + 1, ry) +
+                    raw_get_pixel_ex(src, rx,     ry + 1) +
+                    raw_get_pixel_ex(src, rx + 1, ry + 1);
+                s >>= 2;
+
+                int luma = COERCE((s - black) * 255 / range, 0, 255);
+
+                /* +1.5 EV display lift; zebras still use unmodified RAW values. */
+                luma = MIN(255, (luma * 3));
+                uint8_t color = 38 + (luma * 41 + 127) / 255;
+
+                int x1 = MIN(x + 1, os.x_max - 1);
+                int y1 = MIN(y + 1, os.y_max - 1);
+
+                bvram[BM(x,  y )] = mirror[BM(x,  y )] = color;
+                bvram[BM(x1, y )] = mirror[BM(x1, y )] = color;
+                bvram[BM(x,  y1)] = mirror[BM(x,  y1)] = color;
+                bvram[BM(x1, y1)] = mirror[BM(x1, y1)] = color;
+            }
+        }
+    )
+
+    ml_refresh_display_needed = 1;
+    give_semaphore(settings_sem);
+    return 1;
+}
+#endif
+
 // Protect frame slots and the write queue, for card spanning
 static struct semaphore *write_queue_sem = NULL;
 
