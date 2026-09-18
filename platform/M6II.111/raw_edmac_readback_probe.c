@@ -343,8 +343,9 @@ static struct menu_entry m6ii_raw_census_menu[] = {
     },
 };
 
-static void m6ii_raw_census_init(void)
+static void m6ii_raw_census_init(void *unused)
 {
+    (void)unused;
     menu_add("Debug", m6ii_raw_census_menu, COUNT(m6ii_raw_census_menu));
     DryosDebugMsg(0, 15, "M6II RAW EDMAC census registered");
 }
