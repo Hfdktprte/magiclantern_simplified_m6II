@@ -945,10 +945,27 @@ void setup_bit_depth_digital_gain(int force_off)
 
 /* called when starting to record */
 static REQUIRES(settings_sem)
-void setup_bit_depth()
+int setup_bit_depth()
 {
-    raw_lv_request_bpp(BPP);
+    int requested_bpp = BPP;
+
+    raw_lv_request_bpp(requested_bpp);
+
+    /*
+     * Never start a recording with container geometry that disagrees with
+     * Canon's actual RAW writer.  On M6II this also acts as the safety gate
+     * for the runtime-validated PackMode + edmac_set_size patch.
+     */
+    if (raw_info.bits_per_pixel != requested_bpp)
+    {
+        raw_lv_request_bpp(14);
+        output_format = OUTPUT_14BIT_NATIVE;
+        setup_bit_depth_digital_gain(1);
+        return 0;
+    }
+
     setup_bit_depth_digital_gain(0);
+    return 1;
 }
 
 /* called when recording ends, or when raw video is turned off */
@@ -3433,8 +3450,14 @@ void raw_video_rec_task(uint32_t card_index)
         take_semaphore(settings_sem, 0);
         update_resolution_params();
         setup_buffers();
-        setup_bit_depth();
+        int bit_depth_ok = setup_bit_depth();
         give_semaphore(settings_sem);
+
+        if (!bit_depth_ok)
+        {
+            NotifyBox(5000, "RAW bit-depth setup failed; restored 14-bit");
+            goto cleanup;
+        }
 
         /* create output file */
         raw_movie_filename = get_next_raw_movie_file_name();
@@ -4558,8 +4581,10 @@ static unsigned int raw_rec_init()
     { // so far, only Digic 5 has working lossless compression, hide on other cams
         if (raw_video_menu->children[2].max > 2)
         {
-            raw_video_menu->children[2].max = 2; // hide lossless options, which are 3, 4, 5
-            output_format = 0; // plain 14-bit, no lossless support on D4, D678 (yet)
+            raw_video_menu->children[2].max = 2; // hide lossless options, keep 14/12/10-bit uncompressed
+            /* preserve a valid low-bit selection; only reset unsupported lossless formats */
+            if (output_format > 2)
+                output_format = 0;
         }
     }
 
