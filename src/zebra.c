@@ -3594,9 +3594,18 @@ int liveview_display_idle()
         || menu_active_and_not_hidden()
         || mirror_down
         || gui_state != GUISTATE_IDLE
+        #if defined(CONFIG_M6II)
+        /*
+         * M6II uses GUI request mode 0x8 for normal LiveView (documented in
+         * platform/M6II.111/consts.h). The generic <=3 test therefore rejects
+         * every normal M6II LiveView frame and disables zebra_should_run().
+         * Trust LiveViewApp_dialog below instead, which is the D6+ criterion.
+         */
+        #else
         || CURRENT_GUI_MODE > 3
         #ifdef CURRENT_GUI_MODE_2
         || CURRENT_GUI_MODE_2 > 3
+        #endif
         #endif
         )
         return 0;
