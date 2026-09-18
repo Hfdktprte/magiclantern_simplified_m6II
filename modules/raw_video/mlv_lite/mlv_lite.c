@@ -3961,8 +3961,19 @@ cleanup:
     if (card_index == 0) // avoid cleaning up twice on dual slot cams
     {
         take_semaphore(settings_sem, 0);
+#ifdef CONFIG_M6II
+        /*
+         * Channel 3 is redirected into fullsize_buffers while recording.
+         * Restore Canon's RAW destination and 14-bit writer first; the M6II
+         * raw core waits for the new writer geometry to settle.  Only then is
+         * it safe to release the buffers Canon may have been DMA-writing.
+         */
+        restore_bit_depth();
+        free_buffers();
+#else
         free_buffers();
         restore_bit_depth();
+#endif
         give_semaphore(settings_sem);
 
         /* everything saved, we can unlock the buttons */
