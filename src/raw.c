@@ -2554,40 +2554,86 @@ static void m6ii_lowbit_write_runtime_log(int requested_bpp)
 }
 
 /*
- * On M6II, changing the low-RAM PackMode field does not by itself rerun
- * Canon's Mem1Path setup.  The live channel therefore keeps its old 14-bit
- * yb_xb pitch, and mlv_lite rejects the first frame.
+ * M6II keeps the RAW channel alive when PackMode changes, so toggling
+ * lv_save_raw does not rerun edmac_set_size.  Re-submit the channel's current
+ * geometry through Canon's own edmac_set_size routine instead.
  *
- * Restarting lv_save_raw is preferable to poking the active EDMAC MMIO:
- * Canon's own Mem1Path startup re-applies state+0x6C (PackMode) and calls
- * edmac_set_size.  Our already-installed Bilal-style hook then changes xb
- * for the requested bit depth before the channel starts again.
+ * The ROM implementation at E058096E takes (channel, struct edmac_info *) and
+ * writes the D8 size registers at +0x48..+0x70.  Preserve every live field,
+ * but feed the canonical 14-bit xb into our Bilal-style hook; the hook then
+ * converts xb to the requested 10/12/14-bit pitch.
  */
-static int m6ii_raw_restart_writer_for_bpp(int bpp, uint32_t expected_mode)
+extern void edmac_set_size(uint32_t channel, struct edmac_info *config);
+
+static int m6ii_raw_apply_writer_pitch(int bpp, uint32_t expected_mode)
 {
-    uint32_t expected_pitch = raw_info.width * bpp / 8u;
+    const uint32_t base = RAW_LV_EDMAC_CHANNEL_ADDR;
+    const uint32_t expected_pitch = raw_info.width * bpp / 8u;
+    const uint32_t base_pitch_14 = raw_info.width * 14u / 8u;
 
-    call("lv_save_raw", 0);
-    msleep(50);
-    call("lv_save_raw", 1);
+    uint32_t yb_xb_before = shamem_read(base + 0x50u);
+    uint32_t actual_pitch_before = yb_xb_before & 0xFFFFu;
 
-    /* Canon needs a couple of LV frames to rebuild/start the RAW writer. */
+    if (actual_pitch_before == expected_pitch &&
+        MEM(M6II_RAW_PACKMODE_ADDR) == expected_mode)
+    {
+        return 1;
+    }
+
+    struct edmac_info cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    uint32_t ys_xs = shamem_read(base + 0x48u);
+    uint32_t ya_xa = shamem_read(base + 0x4Cu);
+    uint32_t yb_xb = shamem_read(base + 0x50u);
+    uint32_t yn_xn = shamem_read(base + 0x54u);
+
+    cfg.xs = ys_xs & 0xFFFFu;
+    cfg.ys = ys_xs >> 16;
+    cfg.xa = ya_xa & 0xFFFFu;
+    cfg.ya = ya_xa >> 16;
+
+    /* Always give the hook Canon's 14-bit source pitch. */
+    cfg.xb = base_pitch_14;
+    cfg.yb = yb_xb >> 16;
+
+    cfg.xn = yn_xn & 0xFFFFu;
+    cfg.yn = yn_xn >> 16;
+
+    cfg.off1s = shamem_read(base + 0x58u);
+    cfg.off2s = shamem_read(base + 0x5Cu);
+    cfg.off1a = shamem_read(base + 0x60u);
+    cfg.off2a = shamem_read(base + 0x64u);
+    cfg.off1b = shamem_read(base + 0x68u);
+    cfg.off2b = shamem_read(base + 0x6Cu);
+    cfg.off3  = shamem_read(base + 0x70u);
+
+    uint32_t calls_before = m6ii_edmac_raw_hook_calls;
+    edmac_set_size(M6II_RAW_EDMAC_CHANNEL, &cfg);
+
+    /* Let the new geometry reach the next RAW frame. */
     wait_lv_frames(2);
 
     if (MEM(M6II_RAW_PACKMODE_ADDR) != expected_mode)
     {
-        m6ii_lowbit_set_error("PackMode reset on RAW restart: got %x expected %x",
+        m6ii_lowbit_set_error("PackMode changed during EDMAC apply: got %x expected %x",
                               MEM(M6II_RAW_PACKMODE_ADDR), expected_mode);
         return 0;
     }
 
-    uint32_t yb_xb = shamem_read(RAW_LV_EDMAC_CHANNEL_ADDR + 0x50u);
-    uint32_t actual_pitch = yb_xb & 0xFFFFu;
+    uint32_t yb_xb_after = shamem_read(base + 0x50u);
+    uint32_t actual_pitch_after = yb_xb_after & 0xFFFFu;
 
-    if (actual_pitch != expected_pitch)
+    if (m6ii_edmac_raw_hook_calls == calls_before)
     {
-        m6ii_lowbit_set_error("RAW restart pitch %x expected %x",
-                              actual_pitch, expected_pitch);
+        m6ii_lowbit_set_error("RAW pitch hook not entered");
+        return 0;
+    }
+
+    if (actual_pitch_after != expected_pitch)
+    {
+        m6ii_lowbit_set_error("RAW EDMAC pitch %x expected %x",
+                              actual_pitch_after, expected_pitch);
         return 0;
     }
 
@@ -3274,21 +3320,13 @@ void raw_lv_request_bpp(int bpp)
     if (shamem_read(PACK32_MODE) == modes[bpp_index])
     #endif
     {
-        /* no hardware change needed; keep metadata synchronized */
-        raw_info.bits_per_pixel = bpp;
-        raw_info.pitch = raw_info.width * raw_info.bits_per_pixel / 8;
-        raw_info.frame_size = raw_info.pitch * raw_info.height;
+        /* no PackMode write needed */
     }
     else
     {
         #if defined(CONFIG_M6II)
         MEM(PACK32_MODE) = modes[bpp_index];
 
-        /*
-         * Read it back before changing raw_info.  If Canon rejects or
-         * immediately rewrites the field, keep the known-good metadata and
-         * let mlv_lite abort rather than creating a mis-sized MLV.
-         */
         if (MEM(PACK32_MODE) != (uint32_t)modes[bpp_index])
         {
             if (bpp < 14)
@@ -3300,48 +3338,41 @@ void raw_lv_request_bpp(int bpp)
         #else
         EngDrvOut(PACK32_MODE, modes[bpp_index]);
         #endif
-
-        raw_info.bits_per_pixel = bpp;
-        raw_info.pitch = raw_info.width * raw_info.bits_per_pixel / 8;
-        raw_info.frame_size = raw_info.pitch * raw_info.height;
-
-        #if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
-        /*
-         * M6II only applies state+0x6C and edmac_set_size when Canon builds
-         * the Mem1Path RAW writer.  Restart that writer so the new PackMode
-         * and pitch are actually applied to channel 3.
-         */
-        int restart_ok = m6ii_raw_restart_writer_for_bpp(
-            bpp, (uint32_t)modes[bpp_index]);
-
-        if (bpp < 14)
-            m6ii_lowbit_write_runtime_log(bpp);
-
-        if (!restart_ok && bpp < 14)
-        {
-            /*
-             * Recover the known-good 14-bit writer before returning.  Keep
-             * the original low-bit error string so setup_bit_depth() aborts
-             * cleanly and tells us what failed.
-             */
-            char saved_error[sizeof(m6ii_lowbit_error)];
-            snprintf(saved_error, sizeof(saved_error), "%s", m6ii_lowbit_error);
-
-            MEM(PACK32_MODE) = MODE_14BIT;
-            raw_info.bits_per_pixel = 14;
-            raw_info.pitch = raw_info.width * 14 / 8;
-            raw_info.frame_size = raw_info.pitch * raw_info.height;
-            (void)m6ii_raw_restart_writer_for_bpp(14, MODE_14BIT);
-
-            snprintf(m6ii_lowbit_error, sizeof(m6ii_lowbit_error), "%s", saved_error);
-            give_semaphore(raw_sem);
-            return;
-        }
-        #else
-        /* after switching bit depth, let Canon's RAW writer settle */
-        wait_lv_frames(2);
-        #endif
     }
+
+    raw_info.bits_per_pixel = bpp;
+    raw_info.pitch = raw_info.width * raw_info.bits_per_pixel / 8;
+    raw_info.frame_size = raw_info.pitch * raw_info.height;
+
+    #if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    int pitch_ok = m6ii_raw_apply_writer_pitch(
+        bpp, (uint32_t)modes[bpp_index]);
+
+    if (bpp < 14)
+        m6ii_lowbit_write_runtime_log(bpp);
+
+    if (!pitch_ok && bpp < 14)
+    {
+        /*
+         * Recover the known-good 14-bit state before returning.  Preserve the
+         * low-bit failure reason so mlv_lite reports the real problem.
+         */
+        char saved_error[sizeof(m6ii_lowbit_error)];
+        snprintf(saved_error, sizeof(saved_error), "%s", m6ii_lowbit_error);
+
+        MEM(PACK32_MODE) = MODE_14BIT;
+        raw_info.bits_per_pixel = 14;
+        raw_info.pitch = raw_info.width * 14 / 8;
+        raw_info.frame_size = raw_info.pitch * raw_info.height;
+        (void)m6ii_raw_apply_writer_pitch(14, MODE_14BIT);
+
+        snprintf(m6ii_lowbit_error, sizeof(m6ii_lowbit_error), "%s", saved_error);
+        give_semaphore(raw_sem);
+        return;
+    }
+    #else
+    wait_lv_frames(2);
+    #endif
 
     give_semaphore(raw_sem);
 }
