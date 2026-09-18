@@ -5,16 +5,34 @@
 #include <menu.h>
 
 extern int M6II_GetUHS2CardCapability(uint32_t dev, uint32_t *cap);
+extern int M6II_IsUhs2Mode(uint32_t drive_letter, uint32_t *is_uhs2);
 
 static volatile int m6ii_sd_test_busy = 0;
 
-static void m6ii_sd_cap_task(void *unused)
+static void m6ii_sd_mode_task(void *unused)
 {
-    uint32_t cap = 0xffffffff;
-    int err = M6II_GetUHS2CardCapability(1, &cap); /* storage device B / SD slot */
+    uint32_t is_uhs2 = 0xffffffff;
 
-    DryosDebugMsg(0, 15, "M6II SD: UHS2 capability=%#x err=%d", cap, err);
-    NotifyBox(6000, "SD UHS cap=%#x err=%d", cap, err);
+    /*
+     * This is the same lock/query/unlock sequence used by Canon's
+     * DebugSTG_CheckUHS2Mode eventproc.  Unlike GetUHS2CardCapability,
+     * it is specifically intended for an already-mounted B:/ card.
+     */
+    uint32_t old_int = cli();
+    int err = M6II_IsUhs2Mode('B', &is_uhs2);
+    sei(old_int);
+
+    DryosDebugMsg(0, 15, "M6II SD: mounted UHS2 mode=%#x err=%d", is_uhs2, err);
+
+    if (err == 0)
+    {
+        NotifyBox(6000, "SD current mode: %s (%#x)",
+                  is_uhs2 ? "UHS-II" : "non UHS-II", is_uhs2);
+    }
+    else
+    {
+        NotifyBox(6000, "SD mode query failed: val=%#x err=%d", is_uhs2, err);
+    }
 
     m6ii_sd_test_busy = 0;
 }
@@ -31,12 +49,12 @@ static void m6ii_sd_sdr_task(void *arg)
     int err = call("DebugSTG_SetSDRMode", mode);
 
     DryosDebugMsg(0, 15, "M6II SD: DebugSTG_SetSDRMode(%d) -> %d", mode, err);
-    NotifyBox(6000, "Canon SDR mode %d: ret=%d", mode, err);
+    NotifyBox(6000, "Canon storage mode %d: ret=%d", mode, err);
 
     m6ii_sd_test_busy = 0;
 }
 
-static MENU_SELECT_FUNC(m6ii_sd_read_cap)
+static MENU_SELECT_FUNC(m6ii_sd_read_mode)
 {
     if (m6ii_sd_test_busy)
     {
@@ -45,7 +63,7 @@ static MENU_SELECT_FUNC(m6ii_sd_read_cap)
     }
 
     m6ii_sd_test_busy = 1;
-    task_create("m6ii_sd_cap", 0x1c, 0x1000, m6ii_sd_cap_task, 0);
+    task_create("m6ii_sd_mode", 0x1c, 0x1000, m6ii_sd_mode_task, 0);
 }
 
 static void m6ii_sd_start_sdr_mode(int mode)
@@ -57,7 +75,7 @@ static void m6ii_sd_start_sdr_mode(int mode)
     }
 
     m6ii_sd_test_busy = 1;
-    NotifyBox(3000, "Testing Canon SDR mode %d", mode);
+    NotifyBox(3000, "Testing Canon storage mode %d", mode);
     task_create("m6ii_sd_sdr", 0x1c, 0x1000, m6ii_sd_sdr_task, (void *)(uintptr_t)mode);
 }
 
@@ -81,24 +99,24 @@ static struct menu_entry m6ii_sd_test_menu[] =
         .children = (struct menu_entry[])
         {
             {
-                .name = "Read UHS capability",
-                .select = m6ii_sd_read_cap,
+                .name = "Read current UHS-II mode",
+                .select = m6ii_sd_read_mode,
                 .icon_type = IT_ACTION,
-                .help = "Query Canon's M6II SD/UHS capability for the SD slot.",
-                .help2 = "Read-only probe found directly in M6II 1.1.1 ROM.",
+                .help = "Query Canon's mounted-card UHS-II state for B:/.",
+                .help2 = "Read-only. Mirrors DebugSTG_CheckUHS2Mode from M6II 1.1.1 ROM.",
             },
             {
-                .name = "Canon SDR mode 0",
+                .name = "Canon RecordStart",
                 .select = m6ii_sd_sdr_mode_0,
                 .icon_type = IT_ACTION,
-                .help = "Call Canon's native DebugSTG_SetSDRMode(0).",
+                .help = "Call DebugSTG_SetSDRMode(0); ROM routes this to RecordStart(B).",
                 .help2 = "May reconfigure card access. Reboot if the card becomes unavailable.",
             },
             {
-                .name = "Canon SDR mode 1",
+                .name = "Canon RecordEnd",
                 .select = m6ii_sd_sdr_mode_1,
                 .icon_type = IT_ACTION,
-                .help = "Call Canon's native DebugSTG_SetSDRMode(1).",
+                .help = "Call DebugSTG_SetSDRMode(1); ROM routes this to RecordEnd(B).",
                 .help2 = "May reconfigure card access. Reboot if the card becomes unavailable.",
             },
             MENU_EOL,
