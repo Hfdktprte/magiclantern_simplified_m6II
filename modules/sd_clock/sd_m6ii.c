@@ -9,10 +9,9 @@
 extern int M6II_SdCARDGetSpeed(uint32_t dev, uint32_t *speed, uint32_t *clock_selector);
 extern int M6II_SD_ReConfiguration(void);
 extern int M6II_DebugSTG_IsUHSCard(void);
-extern void m6ii_bilal_sd_set_values(const uint32_t *vals);
 extern void m6ii_bilal_sd_reset_stats(void);
-extern void m6ii_bilal_sd_get_stats(uint32_t *calls, uint32_t *hits,
-                                    uint32_t *last_dev, uint32_t *last_selector);
+extern void m6ii_bilal_sd_get_trace(uint32_t *calls, uint32_t *trace,
+                                    uint32_t *div_trace, uint32_t max_entries);
 extern int m6ii_bilal_sd_install_hook(void);
 extern int m6ii_bilal_sd_remove_hook(void);
 
@@ -110,12 +109,10 @@ static int m6ii_regs_match(const uint32_t *vals)
 #define M6II_SD_POST_PRESET_HOOK 0xE012BEA4
 
 
-static uint32_t m6ii_uhs_vals[11];
-
-static volatile uint32_t m6ii_hook_calls = 0;
-static volatile uint32_t m6ii_hook_hits = 0;
-static volatile uint32_t m6ii_hook_last_dev = 0xffffffff;
-static volatile uint32_t m6ii_hook_last_selector = 0xffffffff;
+#define M6II_TRACE_MAX 8
+static uint32_t m6ii_hook_calls = 0;
+static uint32_t m6ii_hook_trace[M6II_TRACE_MAX];
+static uint32_t m6ii_hook_div_trace[M6II_TRACE_MAX];
 
 static int m6ii_boot_test_ran = 0;
 static int m6ii_boot_patch_rc = -1;
@@ -144,12 +141,11 @@ static void m6ii_run_startup_stock_validation(void)
 
     m6ii_boot_test_ran = 1;
     m6ii_hook_calls = 0;
-    m6ii_hook_hits = 0;
-    m6ii_hook_last_dev = 0xffffffff;
-    m6ii_hook_last_selector = 0xffffffff;
-
-    m6ii_copy_words(m6ii_uhs_vals, m6ii_canon_195, 11);
-    m6ii_bilal_sd_set_values(m6ii_uhs_vals);
+    for (int i = 0; i < M6II_TRACE_MAX; i++)
+    {
+        m6ii_hook_trace[i] = 0xffffffff;
+        m6ii_hook_div_trace[i] = 0xffffffff;
+    }
     m6ii_bilal_sd_reset_stats();
 
     m6ii_boot_get_before =
@@ -176,22 +172,25 @@ static void m6ii_run_startup_stock_validation(void)
         m6ii_boot_live_195 = m6ii_regs_match(m6ii_canon_195);
         m6ii_boot_div = MEM(0xD0100604);
 
-        m6ii_bilal_sd_get_stats((uint32_t *)&m6ii_hook_calls,
-                                (uint32_t *)&m6ii_hook_hits,
-                                (uint32_t *)&m6ii_hook_last_dev,
-                                (uint32_t *)&m6ii_hook_last_selector);
+        m6ii_bilal_sd_get_trace(&m6ii_hook_calls,
+                                m6ii_hook_trace,
+                                m6ii_hook_div_trace,
+                                M6II_TRACE_MAX);
         m6ii_bilal_sd_remove_hook();
     }
 
     DryosDebugMsg(0, 15,
-                  "M6II Bilal boot stock: patch=%d rc=%d get=%d/%d %d/%d->%d/%d UHS=%d/%d calls=%d hits=%d last=%d/%d live195=%d div=%d",
+                  "M6II Bilal trace: patch=%d rc=%d get=%d/%d %d/%d->%d/%d UHS=%d/%d calls=%d seq=%x,%x,%x,%x,%x,%x,%x,%x div=%x,%x,%x,%x,%x,%x,%x,%x live195=%d finaldiv=%d",
                   m6ii_boot_patch_rc, m6ii_boot_reconfig_rc,
                   m6ii_boot_get_before, m6ii_boot_get_after,
                   m6ii_boot_speed_before, m6ii_boot_clock_before,
                   m6ii_boot_speed_after, m6ii_boot_clock_after,
                   m6ii_boot_uhs_before, m6ii_boot_uhs_after,
-                  m6ii_hook_calls, m6ii_hook_hits,
-                  m6ii_hook_last_dev, m6ii_hook_last_selector,
+                  m6ii_hook_calls,
+                  m6ii_hook_trace[0], m6ii_hook_trace[1], m6ii_hook_trace[2], m6ii_hook_trace[3],
+                  m6ii_hook_trace[4], m6ii_hook_trace[5], m6ii_hook_trace[6], m6ii_hook_trace[7],
+                  m6ii_hook_div_trace[0], m6ii_hook_div_trace[1], m6ii_hook_div_trace[2], m6ii_hook_div_trace[3],
+                  m6ii_hook_div_trace[4], m6ii_hook_div_trace[5], m6ii_hook_div_trace[6], m6ii_hook_div_trace[7],
                   m6ii_boot_live_195, m6ii_boot_div);
 }
 
@@ -200,19 +199,22 @@ static MENU_SELECT_FUNC(m6ii_show_boot_result)
     if (!m6ii_boot_test_ran)
     {
         NotifyBox(7000,
-                  "No startup validation this boot.\nSet Boot stock validation=ON, then restart.");
+                  "No setup trace this boot.\nSet Trace setup on restart=ON, then restart.");
         return;
     }
 
     NotifyBox(15000,
-              "Bilal boot stock\npatch=%d rc=%d get=%d/%d\nlogical %d/%d -> %d/%d\nUHS=%d->%d calls=%d hits=%d\nlast=%d/%d live195=%d div=%d",
+              "Bilal D8 trace\npatch=%d rc=%d get=%d/%d\nlogical %d/%d -> %d/%d UHS=%d->%d\ncalls=%d\nseq=%x %x %x %x\n    %x %x %x %x\ndiv=%x %x %x %x\n    %x %x %x %x\nlive195=%d final=%d",
               m6ii_boot_patch_rc, m6ii_boot_reconfig_rc,
               m6ii_boot_get_before, m6ii_boot_get_after,
               m6ii_boot_speed_before, m6ii_boot_clock_before,
               m6ii_boot_speed_after, m6ii_boot_clock_after,
               m6ii_boot_uhs_before, m6ii_boot_uhs_after,
-              m6ii_hook_calls, m6ii_hook_hits,
-              m6ii_hook_last_dev, m6ii_hook_last_selector,
+              m6ii_hook_calls,
+              m6ii_hook_trace[0], m6ii_hook_trace[1], m6ii_hook_trace[2], m6ii_hook_trace[3],
+              m6ii_hook_trace[4], m6ii_hook_trace[5], m6ii_hook_trace[6], m6ii_hook_trace[7],
+              m6ii_hook_div_trace[0], m6ii_hook_div_trace[1], m6ii_hook_div_trace[2], m6ii_hook_div_trace[3],
+              m6ii_hook_div_trace[4], m6ii_hook_div_trace[5], m6ii_hook_div_trace[6], m6ii_hook_div_trace[7],
               m6ii_boot_live_195, m6ii_boot_div);
 }
 
@@ -338,19 +340,19 @@ static struct menu_entry m6ii_bilal_menu[] =
                 .help2 = "Stock M6II SDR104 has tested as speed=5, clock=9.",
             },
             {
-                .name = "Boot stock validation",
+                .name = "Trace setup on restart",
                 .priv = &m6ii_bilal_boot_test,
                 .max = 1,
                 .choices = CHOICES("OFF", "ON next restart"),
-                .help = "Bilal-style one-shot stock validation during module startup.",
-                .help2 = "Set ON, then restart. No overclock values; uses Canon's 195MHz array.",
+                .help = "Trace Canon's D8 SD preset sequence during startup reconfiguration.",
+                .help2 = "One-shot. Read-only hook: no SD register values are changed.",
             },
             {
                 .name = "Show startup result",
                 .select = m6ii_show_boot_result,
                 .icon_type = IT_ACTION,
-                .help = "Show the result captured by the Bilal startup validation.",
-                .help2 = "Includes hook calls/hits, UHS state, logical speed/clock and live preset match.",
+                .help = "Show the selector/divider sequence captured during reconfiguration.",
+                .help2 = "Each seq word is dev<<16 | selector. No controller override is performed.",
             },
             {
                 .name = "Dump Bilal UHS tables",
