@@ -177,6 +177,10 @@ THUMB_FN(0xe0580962, edmac_set_address)
 THUMB_FN(0xe058096e, edmac_set_size)
 THUMB_FN(0xe0580e5a, edmac_set_transfer_mode)
 
+/** M6II SD/UHS (verified from ROM0 1.1.1) **/
+/* Canon storage query used by DebugSTG_GetUHS2CardCapability. */
+THUMB_FN(0xe057d584, M6II_GetUHS2CardCapability)
+
 /** Uncategorized **/
 DATA_PTR(0x14684, sd_device)
 THUMB_FN(0xe0818adc, _LoadCalendarFromRTC)
