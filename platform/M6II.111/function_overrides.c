@@ -146,13 +146,6 @@ void _engio_write(uint32_t* reg_list) { return; }
 #define M6II_SD_POST_PRESET_HOOK 0xE012BEA4u
 #define M6II_SD_DEVICE           0u
 
-static const uint32_t m6ii_bilal_sd_regs[11] =
-{
-    0xD0100600u, 0xD0100618u, 0xD010061Cu, 0xD0100620u,
-    0xD010062Cu, 0xD0100630u, 0xD0100624u, 0xD0100628u,
-    0xD0100638u, 0xD0100604u, 0xD010060Cu,
-};
-
 #define M6II_BILAL_TRACE_MAX 8
 static volatile uint32_t m6ii_bilal_sd_calls = 0;
 static volatile uint32_t m6ii_bilal_sd_trace[M6II_BILAL_TRACE_MAX];
@@ -161,12 +154,6 @@ static volatile uint32_t m6ii_bilal_sd_div_trace[M6II_BILAL_TRACE_MAX];
 static struct patch m6ii_bilal_sd_patch[1];
 static uint8_t m6ii_bilal_sd_hook_code[8] __attribute__((aligned(4)));
 static int m6ii_bilal_sd_hook_installed = 0;
-
-void m6ii_bilal_sd_set_values(const uint32_t *vals)
-{
-    for (int i = 0; i < 11; i++)
-        m6ii_bilal_sd_vals[i] = vals[i];
-}
 
 void m6ii_bilal_sd_reset_stats(void)
 {
