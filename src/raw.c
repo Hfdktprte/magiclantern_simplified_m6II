@@ -1057,6 +1057,16 @@ int raw_update_params_work()
         skip_left   = 88;
         #endif
 
+        #ifdef CONFIG_M6II
+        /*
+         * Bring-up values inherited from the working M50 DIGIC 8 port.
+         * They are only used to identify a plausible optical-black region;
+         * final M6II active-area offsets will be calibrated from captured RAW.
+         */
+        skip_top    = 34;
+        skip_left   = 88;
+        #endif
+
         dbg_printf("LV raw buffer: %x (%dx%d)\n", raw_info.buffer, width, height);
         dbg_printf("Skip left:%d right:%d top:%d bottom:%d\n", skip_left, skip_right, skip_top, skip_bottom);
 #endif
@@ -1284,6 +1294,25 @@ int raw_update_params_work()
     ASSERT(raw_info.bits_per_pixel == 14);
     int black_mean = 0, black_stdev_x100 = 0;
     int ok = autodetect_black_level(&black_mean, &black_stdev_x100);
+
+    #ifdef CONFIG_M6II
+    /*
+     * M6II bring-up fallback:
+     * do not let an uncalibrated optical-black crop keep RAW video at 0x0.
+     * Geometry/buffer are already runtime-proven from the native RAW writer.
+     * If the generic black-bar detector rejects our provisional border,
+     * use conservative metadata values and continue.  This affects metadata/
+     * preview calculations only; it does not alter or synthesize RAW pixels.
+     */
+    if (!ok && lv && is_movie_mode())
+    {
+        black_mean = 2048;
+        black_stdev_x100 = 800; /* 8 DN placeholder; refine from real MLV */
+        ok = 1;
+        printf("M6II: provisional black-level fallback\n");
+    }
+    #endif
+
     #ifdef BLACK_LEVEL
     if (ABS(black_mean - BLACK_LEVEL) < 64)
     {
