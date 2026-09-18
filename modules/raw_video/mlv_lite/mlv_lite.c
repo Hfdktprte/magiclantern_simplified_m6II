@@ -336,16 +336,23 @@ int mlv_lite_get_recording_rect(int *x, int *y, int *w, int *h, int *bpp)
 
 /*
  * Render one framing-correct RAW preview frame into the current Canon YUV
- * display buffer.  This deliberately stays 14-bit-only until the core RAW
- * preview/pixel accessors are validated for M6II 10/12-bit packing.
+ * display buffer.  M6II core pixel accessors normalize packed 10/12-bit
+ * samples back to the 14-bit overlay scale.
  */
 int mlv_lite_render_recording_preview(int quality)
 {
     if (!settings_sem || !raw_video_enabled || !lv)
         return 0;
 
+#if defined(CONFIG_M6II)
+    if (raw_info.bits_per_pixel != 14 &&
+        raw_info.bits_per_pixel != 12 &&
+        raw_info.bits_per_pixel != 10)
+        return 0;
+#else
     if (raw_info.bits_per_pixel != 14)
         return 0;
+#endif
 
     take_semaphore(settings_sem, 0);
 
