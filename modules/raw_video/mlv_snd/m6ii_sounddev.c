@@ -144,23 +144,29 @@ int StartASIFDMAADC(void *buffer1, uint32_t size1,
     legacy_next_size = size2;
     legacy_complete_cbr = cbr;
 
-    if (!m6ii_configured)
+    /*
+     * Canon's own M6II callers build a fresh stream config and call
+     * SoundDev setup immediately before every movie-audio start.  The stop
+     * path tears down the native AStream buffer state, so reusing a previous
+     * setup on the next recording leaves START/SIZE cleared and causes the
+     * second stop to assert in AudioStreamState.
+     */
+    memset(&m6ii_cfg, 0, sizeof(m6ii_cfg));
+    m6ii_cfg.sample_rate = 48000;
+    m6ii_cfg.bits_per_sample = 16;
+    m6ii_cfg.channels = 2;
+    m6ii_cfg.record_cbr = m6ii_sound_record_cbr;
+    m6ii_cfg.stop_cbr = m6ii_sound_stop_cbr;
+    m6ii_cfg.ctx = 0;
+
+    int setup_rc = M6II_SOUND_SETUP(&m6ii_cfg);
+    if (setup_rc)
     {
-        memset(&m6ii_cfg, 0, sizeof(m6ii_cfg));
-        m6ii_cfg.sample_rate = 48000;
-        m6ii_cfg.bits_per_sample = 16;
-        m6ii_cfg.channels = 2;
-        m6ii_cfg.record_cbr = m6ii_sound_record_cbr;
-        m6ii_cfg.stop_cbr = m6ii_sound_stop_cbr;
-        m6ii_cfg.ctx = 0;
-
-        int rc = M6II_SOUND_SETUP(&m6ii_cfg);
-        if (rc)
-            return rc;
-
-        m6ii_configured = 1;
+        m6ii_configured = 0;
+        return setup_rc;
     }
 
+    m6ii_configured = 1;
     m6ii_running = 1;
     int rc = M6II_SOUND_START();
     if (rc)
@@ -189,6 +195,7 @@ int StopASIFDMAADC(void)
 
     int rc = M6II_SOUND_STOP();
     m6ii_running = 0;
+    m6ii_configured = 0;
 
     legacy_current = 0;
     legacy_current_size = 0;
