@@ -6,6 +6,7 @@
 #include <fio-ml.h>
 
 extern int M6II_SdCARDGetSpeed(uint32_t dev, uint32_t *speed, uint32_t *clock_selector);
+extern int M6II_SD_ReConfiguration(void);
 
 /*
  * M6II 1.1.1 / DIGIC 8 Bilal sd_uhs port notes.
@@ -61,6 +62,124 @@ static const uint32_t m6ii_clock_tables[10] =
 };
 
 static volatile int m6ii_sd_test_busy = 0;
+
+
+#define M6II_SELECTOR9_TABLE 0x0001E5E8
+
+/* Known-good Canon device-0 blocks from the user's M6II table dump. */
+static const uint32_t m6ii_canon_156[11] =
+{
+    0x00000001, 0x00000001, 0x1D000001, 0x00000000,
+    0x00000100, 0x00000100, 0x00000100, 0x00000100,
+    0x00000000, 0x00000001, 0x00000001,
+};
+
+static const uint32_t m6ii_canon_195[11] =
+{
+    0x00000001, 0x00000001, 0x1D000001, 0x00000000,
+    0x00000100, 0x00000100, 0x00000100, 0x00000100,
+    0x00000000, 0x00000000, 0x00000001,
+};
+
+static void m6ii_copy_words(volatile uint32_t *dst, const uint32_t *src, int count)
+{
+    for (int i = 0; i < count; i++)
+        dst[i] = src[i];
+}
+
+static int m6ii_regs_match(const uint32_t *vals)
+{
+    for (int i = 0; i < COUNT(m6ii_uhs_regs); i++)
+    {
+        if (MEM(m6ii_uhs_regs[i]) != vals[i])
+            return 0;
+    }
+    return 1;
+}
+
+static void m6ii_bilal_reconfig_task(void *arg)
+{
+    int mode = (int)(uintptr_t)arg; /* 0=stock only, 1=known-good 156 override */
+    volatile uint32_t *sel9 = (volatile uint32_t *)M6II_SELECTOR9_TABLE;
+    uint32_t saved[11];
+
+    for (int i = 0; i < 11; i++)
+        saved[i] = sel9[i];
+
+    uint32_t speed_before = 0xffffffff, clock_before = 0xffffffff;
+    M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_before, &clock_before);
+
+    if (mode == 1)
+    {
+        /*
+         * Bilal-style D8 adaptation:
+         * supply our uhs_vals to Canon's normal setup/preset writer,
+         * then invoke the camera's full SD reconfiguration path.
+         * We use Canon's own 156 MHz array for the first validation.
+         */
+        m6ii_copy_words(sel9, m6ii_canon_156, 11);
+    }
+    else
+    {
+        /* Ensure stock selector-9 contents before a stock-only validation. */
+        m6ii_copy_words(sel9, m6ii_canon_195, 11);
+    }
+
+    int rc = M6II_SD_ReConfiguration();
+    msleep(150);
+
+    uint32_t speed_after = 0xffffffff, clock_after = 0xffffffff;
+    int get_rc = M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_after, &clock_after);
+    int live_156 = m6ii_regs_match(m6ii_canon_156);
+    int live_195 = m6ii_regs_match(m6ii_canon_195);
+    uint32_t divider = MEM(0xD0100604);
+
+    /*
+     * Restore Canon's selector-9 RAM table immediately.  This does not alter
+     * the just-programmed controller state; any later Canon reconfiguration
+     * or reboot will therefore use the original 195 MHz preset.
+     */
+    m6ii_copy_words(sel9, saved, 11);
+
+    DryosDebugMsg(0, 15,
+                  "M6II Bilal reconfig: mode=%d rc=%d %d/%d -> %d/%d get=%d live156=%d live195=%d div=%d",
+                  mode, rc, speed_before, clock_before, speed_after, clock_after,
+                  get_rc, live_156, live_195, divider);
+
+    NotifyBox(12000,
+              "Bilal reconfig %s\nrc=%d get=%d\nlogical %d/%d -> %d/%d\nlive156=%d live195=%d D0100604=%d",
+              mode ? "156 test" : "stock",
+              rc, get_rc, speed_before, clock_before, speed_after, clock_after,
+              live_156, live_195, divider);
+
+    m6ii_sd_test_busy = 0;
+}
+
+static MENU_SELECT_FUNC(m6ii_reconfig_stock)
+{
+    if (m6ii_sd_test_busy)
+    {
+        NotifyBox(2000, "SD port test already running");
+        return;
+    }
+
+    m6ii_sd_test_busy = 1;
+    task_create("m6ii_recfg_stock", 0x1c, 0x1800,
+                m6ii_bilal_reconfig_task, (void *)0);
+}
+
+static MENU_SELECT_FUNC(m6ii_bilal_validate_156)
+{
+    if (m6ii_sd_test_busy)
+    {
+        NotifyBox(2000, "SD port test already running");
+        return;
+    }
+
+    m6ii_sd_test_busy = 1;
+    task_create("m6ii_bilal_156", 0x1c, 0x1800,
+                m6ii_bilal_reconfig_task, (void *)1);
+}
 
 static void m6ii_read_speed_task(void *unused)
 {
@@ -182,6 +301,20 @@ static struct menu_entry m6ii_bilal_menu[] =
                 .icon_type = IT_ACTION,
                 .help = "Read Canon's current UHS-I speed enum and clock selector.",
                 .help2 = "Stock M6II SDR104 has tested as speed=5, clock=9.",
+            },
+            {
+                .name = "Validate stock reconfigure",
+                .select = m6ii_reconfig_stock,
+                .icon_type = IT_ACTION,
+                .help = "Run Canon's full SD reconfiguration with untouched stock 195 preset.",
+                .help2 = "First validation of the M6II equivalent of Bilal's SD_ReConfiguration().",
+            },
+            {
+                .name = "Validate Bilal path: 156",
+                .select = m6ii_bilal_validate_156,
+                .icon_type = IT_ACTION,
+                .help = "Feed Canon's known-good 156MHz array through the Bilal preset/reconfigure path.",
+                .help2 = "No guessed OC values. Selector-9 RAM table is restored immediately after reinit.",
             },
             {
                 .name = "Dump Bilal UHS tables",
