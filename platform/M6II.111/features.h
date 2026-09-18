@@ -33,6 +33,9 @@
 // Bilal M50 RAW-video architecture: enable generic RAW LV core.
 #define CONFIG_RAW_LIVEVIEW
 
+// M6II RAW-video branch: use ML's existing LiveView RAW zebra renderer.
+#define FEATURE_RAW_ZEBRAS
+
 // Enable remapping ROM pages to RAM
 #define CONFIG_SGI_HANDLERS
 #define CONFIG_MMU_REMAP
