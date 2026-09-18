@@ -1629,108 +1629,136 @@ raw_set_geometry(int width, int height, int skip_left, int skip_right, int skip_
     dbg_printf("  should be: (%d,%d) - (%d,%d)\n", raw_info.active_area.x1, raw_info.active_area.y1, raw_info.active_area.x2, raw_info.active_area.y2);
 }
 
+/*
+ * Read Canon/MLV packed RAW samples.
+ *
+ * The low-bit layout is the same bitstream consumed by dng_unpack_image_bits()
+ * in modules/raw_video/mlv_rec/dng/dng.c.  Keep core overlay values in the
+ * historical 14-bit scale so existing black/white/zebra math remains valid.
+ */
+static inline int FAST raw_get_packed_pixel_ex(void *raw_buffer, int x, int y)
+{
+    int bpp = raw_info.bits_per_pixel;
+
+    if (bpp == 14)
+    {
+        struct raw_pixblock * p =
+            (void*)raw_buffer + y * raw_info.pitch + (x / 8) * 14;
+        switch (x & 7)
+        {
+            case 0: return p->a;
+            case 1: return p->b_lo | (p->b_hi << 12);
+            case 2: return p->c_lo | (p->c_hi << 10);
+            case 3: return p->d_lo | (p->d_hi << 8);
+            case 4: return p->e_lo | (p->e_hi << 6);
+            case 5: return p->f_lo | (p->f_hi << 4);
+            case 6: return p->g_lo | (p->g_hi << 2);
+            case 7: return p->h;
+        }
+    }
+
+#if defined(CONFIG_M6II)
+    if (bpp == 10 || bpp == 12)
+    {
+        const uint8_t *row8 = (const uint8_t*)raw_buffer + y * raw_info.pitch;
+        const uint16_t *row = (const uint16_t*)row8;
+
+        uint32_t bits_offset = (uint32_t)x * (uint32_t)bpp;
+        uint32_t word_index = bits_offset >> 4;
+        uint32_t bits_shift = bits_offset & 15;
+
+        uint32_t byte_offset = word_index * 2;
+        uint32_t w0 = row[word_index];
+        uint32_t w1 = (byte_offset + 2 < (uint32_t)raw_info.pitch)
+                    ? row[word_index + 1]
+                    : 0;
+        uint32_t packed = w0 | (w1 << 16);
+
+        /* Same rotation as dng_unpack_image_bits(), normalized modulo 32. */
+        uint32_t rot = (16 + ((32 - bpp) - bits_shift)) & 31;
+        uint32_t data = rot ? ((packed >> rot) | (packed << (32 - rot))) : packed;
+        uint32_t sample = data & ((1u << bpp) - 1u);
+
+        return (int)(sample << (14 - bpp));
+    }
+#endif
+
+    return 0;
+}
+
+int FAST raw_get_pixel_ex(void* raw_buffer, int x, int y)
+{
+    return raw_get_packed_pixel_ex(raw_buffer, x, y);
+}
+
+int FAST raw_get_pixel(int x, int y)
+{
+    return raw_get_packed_pixel_ex(raw_info.buffer, x, y);
+}
+
 int FAST raw_red_pixel(int x, int y)
 {
-    struct raw_pixblock * buf = (void*)raw_info.buffer;
-    y = (y/2) * 2;
-    int i = ((y * raw_info.width + x) / 8);
-    return buf[i].a;
+    int bx = (x / 8) * 8;
+    y = (y / 2) * 2;
+    return raw_get_pixel(bx, y);
 }
 
 int FAST raw_green_pixel(int x, int y)
 {
-    struct raw_pixblock * buf = (void*)raw_info.buffer;
-    y = (y/2) * 2;
-    int i = ((y * raw_info.width + x) / 8);
-    return buf[i].h;
+    int bx = (x / 8) * 8;
+    y = (y / 2) * 2;
+    return raw_get_pixel(bx + 7, y);
 }
 
 int FAST raw_blue_pixel(int x, int y)
 {
-    struct raw_pixblock * buf = (void*)raw_info.buffer;
-    y = (y/2) * 2 - 1;
-    int i = ((y * raw_info.width + x) / 8);
-    return buf[i].h;
+    int bx = (x / 8) * 8;
+    y = (y / 2) * 2 - 1;
+    return raw_get_pixel(bx + 7, y);
 }
 
 int FAST raw_red_pixel_dark(int x, int y)
 {
-    struct raw_pixblock * buf = (void*)raw_info.buffer;
-    y = (y/2) * 2;
-    int i = ((y * raw_info.width + x) / 8);
-    return MIN(buf[i].a, buf[i - raw_info.width*2/8].a);
+    int bx = (x / 8) * 8;
+    y = (y / 2) * 2;
+    return MIN(raw_get_pixel(bx, y), raw_get_pixel(bx, y - 2));
 }
 
 int FAST raw_green_pixel_dark(int x, int y)
 {
-    struct raw_pixblock * buf = (void*)raw_info.buffer;
-    y = (y/2) * 2;
-    int i = ((y * raw_info.width + x) / 8);
-    return MIN(buf[i].h, buf[i - raw_info.width*2/8].h);
+    int bx = (x / 8) * 8;
+    y = (y / 2) * 2;
+    return MIN(raw_get_pixel(bx + 7, y), raw_get_pixel(bx + 7, y - 2));
 }
 
 int FAST raw_blue_pixel_dark(int x, int y)
 {
-    struct raw_pixblock * buf = (void*)raw_info.buffer;
-    y = (y/2) * 2 - 1;
-    int i = ((y * raw_info.width + x) / 8);
-    return MIN(buf[i].h, buf[i - raw_info.width*2/8].h);
+    int bx = (x / 8) * 8;
+    y = (y / 2) * 2 - 1;
+    return MIN(raw_get_pixel(bx + 7, y), raw_get_pixel(bx + 7, y - 2));
 }
 
 int FAST raw_red_pixel_bright(int x, int y)
 {
-    struct raw_pixblock * buf = (void*)raw_info.buffer;
-    y = (y/2) * 2;
-    int i = ((y * raw_info.width + x) / 8);
-    return MAX(buf[i].a, buf[i - raw_info.width*2/8].a);
+    int bx = (x / 8) * 8;
+    y = (y / 2) * 2;
+    return MAX(raw_get_pixel(bx, y), raw_get_pixel(bx, y - 2));
 }
 
 int FAST raw_green_pixel_bright(int x, int y)
 {
-    struct raw_pixblock * buf = (void*)raw_info.buffer;
-    y = (y/2) * 2;
-    int i = ((y * raw_info.width + x) / 8);
-    return MAX(buf[i].h, buf[i - raw_info.width*2/8].h);
+    int bx = (x / 8) * 8;
+    y = (y / 2) * 2;
+    return MAX(raw_get_pixel(bx + 7, y), raw_get_pixel(bx + 7, y - 2));
 }
 
 int FAST raw_blue_pixel_bright(int x, int y)
 {
-    struct raw_pixblock * buf = (void*)raw_info.buffer;
-    y = (y/2) * 2 - 1;
-    int i = ((y * raw_info.width + x) / 8);
-    return MAX(buf[i].h, buf[i - raw_info.width*2/8].h);
+    int bx = (x / 8) * 8;
+    y = (y / 2) * 2 - 1;
+    return MAX(raw_get_pixel(bx + 7, y), raw_get_pixel(bx + 7, y - 2));
 }
 
-
-int FAST raw_get_pixel(int x, int y) {
-    struct raw_pixblock * p = (void*)raw_info.buffer + y * raw_info.pitch + (x/8)*14;
-    switch (x%8) {
-        case 0: return p->a;
-        case 1: return p->b_lo | (p->b_hi << 12);
-        case 2: return p->c_lo | (p->c_hi << 10);
-        case 3: return p->d_lo | (p->d_hi << 8);
-        case 4: return p->e_lo | (p->e_hi << 6);
-        case 5: return p->f_lo | (p->f_hi << 4);
-        case 6: return p->g_lo | (p->g_hi << 2);
-        case 7: return p->h;
-    }
-    return p->a;
-}
-
-int FAST raw_get_pixel_ex(void* raw_buffer, int x, int y) {
-    struct raw_pixblock * p = (void*)raw_buffer + y * raw_info.pitch + (x/8)*14;
-    switch (x%8) {
-        case 0: return p->a;
-        case 1: return p->b_lo | (p->b_hi << 12);
-        case 2: return p->c_lo | (p->c_hi << 10);
-        case 3: return p->d_lo | (p->d_hi << 8);
-        case 4: return p->e_lo | (p->e_hi << 6);
-        case 5: return p->f_lo | (p->f_hi << 4);
-        case 6: return p->g_lo | (p->g_hi << 2);
-        case 7: return p->h;
-    }
-    return p->a;
-}
 
 void FAST raw_set_pixel(int x, int y, int value)
 {
@@ -2687,7 +2715,7 @@ static void FAST raw_preview_color_work(void* raw_buffer, void* lv_buffer, int y
         return;
     }
 
-    struct raw_pixblock * raw = CACHEABLE(raw_buffer);
+    uint8_t * raw = CACHEABLE(raw_buffer);
     if (!raw)
     {
         dbg_printf("No RAW buffer\n");
@@ -2745,43 +2773,16 @@ static void FAST raw_preview_color_work(void* raw_buffer, void* lv_buffer, int y
         memset(&lv32[LV(0,y)/4],  0, LV(x1,y) - LV(0,y)/4*4);
         memset(&lv32[LV(x2,y)/4], 0, LV(0,1) - LV(x2,0)/4*4);
 
-        struct raw_pixblock * row = (void*)raw + yr * raw_info.pitch;
-
         /* half-res horizontally, to simplify YUV422 math */
         for (int x = x1; x < x2; x += 2)
         {
             int xr = lv2rx[x];
-            struct raw_pixblock * p = row + (xr/8);                 /* RG (xr and yr are multiples of 2) */
-            struct raw_pixblock * q = (void*) p + raw_info.pitch;   /* GB, next line */
-            int r,g,b;
 
-            /* RGGB cell */
-            /* note: at 1920 horizontal resolution in raw, downsampling by 8 would result in 240px horizontally => looks ugly */
-            switch (xr%8)
-            {
-                case 0:
-                    r = PA;
-                    g = (PB + QA) >> 1;
-                    b = QB;
-                    break;
-                case 2:
-                    r = PC;
-                    g = (PD + QC) >> 1;
-                    b = QD;
-                    break;
-                case 4:
-                    r = PE;
-                    g = (PF + QE) >> 1;
-                    b = QF;
-                    break;
-                case 6:
-                    r = PG;
-                    g = (PH + QG) >> 1;
-                    b = QH;
-                    break;
-                default:
-                    r = g = b = 0;
-            }
+            /* RGGB cell; accessor handles M6II 10/12/14-bit packing. */
+            int r = raw_get_pixel_ex(raw, xr,     yr);
+            int g = (raw_get_pixel_ex(raw, xr + 1, yr) +
+                     raw_get_pixel_ex(raw, xr,     yr + 1)) >> 1;
+            int b = raw_get_pixel_ex(raw, xr + 1, yr + 1);
             
             /* div is chosen so that ((white-black) >> div) < 1024 */
             r = gamma_rb[COERCE(r - black, 0, white-black) >> div];
@@ -2807,7 +2808,7 @@ static void FAST raw_preview_fast_work(void* raw_buffer, void* lv_buffer, int y1
         return;
     }
 
-    struct raw_pixblock * raw = CACHEABLE(raw_buffer);
+    uint8_t * raw = CACHEABLE(raw_buffer);
     if (!raw)
     {
         dbg_printf("No RAW buffer\n");
@@ -2859,15 +2860,12 @@ static void FAST raw_preview_fast_work(void* raw_buffer, void* lv_buffer, int y1
         memset(&lv64[LV(0,y)/8],  0, LV(x1,y) - LV(0,y)/8*8);
         memset(&lv64[LV(x2,y)/8], 0, LV(0,1) - LV(x2,0)/8*8);
 
-        struct raw_pixblock * row = (void*)raw + yr * raw_info.pitch;
-
         if (y%2) continue;
 
         for (int x = x1; x < x2; x += 4)
         {
             int xr = lv2rx[x];
-            struct raw_pixblock * p = row + (xr/8);
-            int c = p->a;
+            int c = raw_get_pixel_ex(raw, xr, yr);
             uint64_t Y = gamma[COERCE(c - black, 0, white-black) >> div];
             Y = (Y << 8) | (Y << 24) | (Y << 40) | (Y << 56);
             int idx = LV(x,y)/8;
@@ -2880,8 +2878,15 @@ static void FAST raw_preview_fast_work(void* raw_buffer, void* lv_buffer, int y1
 
 void FAST raw_preview_fast_ex(void* raw_buffer, void* lv_buffer, int y1, int y2, int quality)
 {
+#if defined(CONFIG_M6II)
+    if (raw_info.bits_per_pixel != 14 &&
+        raw_info.bits_per_pixel != 12 &&
+        raw_info.bits_per_pixel != 10)
+        return;
+#else
     if (raw_info.bits_per_pixel != 14)
         return;
+#endif
 
     yuv422_buffer_check();
 
@@ -3354,8 +3359,14 @@ int can_use_raw_overlays()
 #ifdef CONFIG_RAW_LIVEVIEW
     if (lv && raw_lv_is_enabled())
     {
+        #if defined(CONFIG_M6II)
+        return raw_info.bits_per_pixel == 14 ||
+               raw_info.bits_per_pixel == 12 ||
+               raw_info.bits_per_pixel == 10;
+        #else
         /* currently, raw overlays only work with 14 bits per pixel */
         return raw_info.bits_per_pixel == 14;
+        #endif
     }
 #endif
 
