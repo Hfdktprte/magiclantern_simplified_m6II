@@ -4354,6 +4354,23 @@ unsigned int raw_rec_keypress_cbr_raw(unsigned int raw_event)
 {
     struct event * event = (struct event *) raw_event;
 
+#ifdef CONFIG_M6II
+    /*
+     * M6II sends separate movie-button press/release events (0x2C/0x2D).
+     * The portable module key API translates the press (BGMT_REC), but has
+     * no REC-release key.  If 0x2D is allowed through while MLV Lite owns
+     * the button, Canon starts/stops its movie/audio pipeline behind RAW
+     * recording; this has produced AudioDS/ImageController ERR70 asserts.
+     */
+    if (raw_video_enabled &&
+        is_movie_mode() &&
+        event->param == BGMT_UNPRESS_REC &&
+        !use_h264_proxy())
+    {
+        return 0;
+    }
+#endif
+
     if (use_h264_proxy())
     {
         if (RAW_IS_PREPARING || RAW_IS_FINISHING)
