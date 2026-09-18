@@ -321,6 +321,21 @@ static void fps_read_current_timer_values();
     //
     // Variable, like 200D?  Different base clock though.
 
+#elif defined(CONFIG_M6II)
+    /*
+     * Measured from the real M6II DIGIC 8 timing registers.
+     *
+     * 4K24/30 and FHD24/30 all resolve to a 76.8 MHz timing-generator base.
+     * In FHD60, A/B remain at the FHD30 values while the effective clock
+     * doubles to 153.6 MHz.
+     *
+     * Keep the high-clock rule limited to the measured FHD >=50fps path.
+     */
+    #define TG_FREQ_BASE ( \
+        (video_mode_resolution == 0 && video_mode_fps >= 50) \
+        ? 153600000 : 76800000)
+    #define FPS_TIMER_A_MIN (fps_timer_a_orig)
+
 #elif defined(CONFIG_DIGIC_VIII) || defined(CONFIG_DIGIC_X)
     #define TG_FREQ_BASE 32000000 //copy from 700D
     #define FPS_TIMER_A_MIN (fps_timer_a_orig)
@@ -913,25 +928,6 @@ int fps_get_current_x1000()
 {
     if (!lv)
         return 0;
-
-#ifdef CONFIG_M6II
-    /*
-     * M6II fps-engio_per_cam.c does not yet expose real AccumH/VSize
-     * registers; its placeholder accessors return 1. Feeding those values
-     * into the generic timing math overflows and yields multi-million FPS,
-     * which breaks MLV duration/data-rate metadata and the recorder timer.
-     *
-     * Until the M6II sensor timing registers are reverse engineered, use
-     * Canon's movie-mode FPS property. NTSC integer menu rates represent
-     * the usual 1000/1001 rates (24->23.976, 30->29.970, 60->59.940).
-     */
-    if (is_movie_mode() && video_mode_fps > 0)
-    {
-        if (is_current_mode_ntsc())
-            return video_mode_fps * 1000 * 1000 / 1001;
-        return video_mode_fps * 1000;
-    }
-#endif
 
     int fps_timer = (get_fps_register_b() & 0xFFFF) + 1;
     int fps_x1000 = TIMER_TO_FPS_x1000(fps_timer);
