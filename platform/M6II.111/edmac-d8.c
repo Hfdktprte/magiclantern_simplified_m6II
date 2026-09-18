@@ -116,6 +116,17 @@ void edmac_memcpy_res_lock(void)
 
 void edmac_memcpy_res_unlock(void)
 {
+    /*
+     * On recorder stop, INT_MIN can follow the final frame immediately.
+     * Give the native Esub5 callback time to complete before teardown.
+     */
+    int wait_ms = 0;
+    while (m6ii_esub5_setup_active && !m6ii_copy_done && wait_ms < 1500)
+    {
+        msleep(1);
+        wait_ms++;
+    }
+
     m6ii_finish_previous_copy();
 
     if (!m6ii_mem2mem_lock)
