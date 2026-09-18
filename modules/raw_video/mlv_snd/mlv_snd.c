@@ -343,6 +343,19 @@ static void mlv_snd_prepare_audio()
 {
     mlv_snd_in_sample_rate = mlv_snd_rates[mlv_snd_rate_sel];
 
+    /*
+     * M6II DIGIC 8 uses Canon's SoundDev/AStream recorder rather than the
+     * legacy ASIF register interface.  The native stream validator accepts
+     * 48 kHz, 16-bit stereo; m6ii_sounddev.c supplies the compatibility API.
+     */
+    if (is_camera("M6II", "1.1.1"))
+    {
+        mlv_snd_in_sample_rate = 48000;
+        mlv_snd_in_bits_per_sample = 16;
+        mlv_snd_in_channels = 2;
+        return;
+    }
+
     /* some models may need this */
     SoundDevActiveIn(0);
     
