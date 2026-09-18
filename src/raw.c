@@ -2246,10 +2246,12 @@ static uint32_t m6ii_raw_packmode_addr(void)
     if ((packmode & 3u) || packmode < 0x1000u || packmode >= 0x01000000u)
         return 0;
 
-    /* Bilal's D8 mapping uses exactly 0/1/2 for 10/12/14-bit. */
-    if (MEM(packmode) > 2u)
-        return 0;
-
+    /*
+     * Do not require the PackMode RAM value to be initialized here.
+     * raw_lv_enable() may reach this point immediately after lv_save_raw(1),
+     * before Canon has populated the live PackMode field for the first frame.
+     * The value itself is validated later, when 10/12-bit is actually requested.
+     */
     return packmode;
 }
 
@@ -2324,10 +2326,6 @@ static int install_edmac_raw_patch(void)
     uint32_t ldr_pc = (M6II_EDMAC_SET_SIZE_ADDR + 6u + 4u) & ~3u;
     uint32_t literal_addr = ldr_pc + ((ldr_lit & 0xFFu) << 2);
     if (MEM(literal_addr) != M6II_DMACINFO_BASE)
-        return 1;
-
-    /* Also require a valid channel-3 PackMode pointer before patching Canon. */
-    if (!m6ii_raw_packmode_addr())
         return 1;
 
     struct function_hook_patch def = {
@@ -2868,9 +2866,36 @@ void raw_lv_request_bpp(int bpp)
         /*
          * 10/12-bit is only safe when both pieces of Bilal's fix are active:
          * PackMode and the Canon RAW-writer pitch hook.
+         *
+         * Do this check here, after RAW has been alive for multiple frames,
+         * rather than during raw_lv_enable().
          */
-        if (!PACK32_MODE || (bpp < 14 && !m6ii_edmac_raw_patch_installed))
+        if (!PACK32_MODE)
         {
+            if (bpp < 14)
+                NotifyBox(5000, "M6II low-bit: PackMode pointer unresolved");
+            give_semaphore(raw_sem);
+            return;
+        }
+
+        uint32_t packmode_before = MEM(PACK32_MODE);
+
+        if (bpp < 14 && !m6ii_edmac_raw_patch_installed)
+        {
+            NotifyBox(5000, "M6II low-bit: RAW pitch hook inactive");
+            give_semaphore(raw_sem);
+            return;
+        }
+
+        /*
+         * Bilal's D8 mapping expects the live field to be 2 in ordinary
+         * 14-bit mode (and 1/0 after switching to 12/10-bit).  Refuse to
+         * overwrite an unrelated-looking field, but report its value so the
+         * M6II mapping can be corrected from camera evidence if necessary.
+         */
+        if (bpp < 14 && packmode_before > 2u)
+        {
+            NotifyBox(7000, "M6II low-bit: PackMode %08x @ %08x", packmode_before, PACK32_MODE);
             give_semaphore(raw_sem);
             return;
         }
@@ -2905,6 +2930,19 @@ void raw_lv_request_bpp(int bpp)
     {
         #if defined(CONFIG_M6II)
         MEM(PACK32_MODE) = modes[bpp_index];
+
+        /*
+         * Read it back before changing raw_info.  If Canon rejects or
+         * immediately rewrites the field, keep the known-good metadata and
+         * let mlv_lite abort rather than creating a mis-sized MLV.
+         */
+        if (MEM(PACK32_MODE) != (uint32_t)modes[bpp_index])
+        {
+            if (bpp < 14)
+                NotifyBox(7000, "M6II low-bit: PackMode write rejected @ %08x", PACK32_MODE);
+            give_semaphore(raw_sem);
+            return;
+        }
         #else
         EngDrvOut(PACK32_MODE, modes[bpp_index]);
         #endif
