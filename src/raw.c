@@ -33,6 +33,10 @@
 #include "fps.h"
 #include "platform/state-object.h"
 
+#ifdef CONFIG_EDMAC_RAW_PATCH
+#include "patch.h"
+#endif
+
 #undef RAW_DEBUG        /* define it to help with porting */
 #undef RAW_DEBUG_DUMP   /* if you want to save the raw image buffer and the DNG from here */
 #undef RAW_DEBUG_BLACK  /* for checking black level calibration */
@@ -2194,13 +2198,196 @@ int _raw_lv_get_iso_post_gain()
 
 #endif // CONFIG_EDMAC_RAW_SLURP
 
+#ifdef CONFIG_EDMAC_RAW_PATCH
+
+/*
+ * EOS M6 Mark II DIGIC 8 low-bit RAW support.
+ *
+ * Bilal's M50 implementation showed that changing PackMode alone is not
+ * sufficient: Canon must also be given a bit-depth-correct RAW writer pitch
+ * or 10/12-bit recording can repeat frames.
+ *
+ * Do not copy the M50 PackMode RAM address or hook bytes.  Resolve the M6II
+ * PackMode pointer from this camera's own DIGIC 8 EDMAC tables, and validate
+ * the M6II edmac_set_size prologue before applying the hook.
+ */
+#if defined(CONFIG_M6II)
+
+#define M6II_RAW_EDMAC_CHANNEL          3u
+#define M6II_DMACINFO_BASE              0xE1008944u
+#define M6II_PACKUNPACK_ID_BASE         (M6II_DMACINFO_BASE - 0x130u)
+#define M6II_PACKUNPACK_INFO_BASE       (M6II_DMACINFO_BASE + 0x260u)
+#define M6II_D8_CHANNEL_COUNT           76u
+#define M6II_EDMAC_SET_SIZE_ADDR        0xE058096Eu
+#define M6II_EDMAC_SET_SIZE_RESUME      ((M6II_EDMAC_SET_SIZE_ADDR + 8u) | 1u)
+
+static int m6ii_edmac_raw_patch_installed = 0;
+static struct patch m6ii_edmac_raw_patches[1];
+static uint8_t m6ii_edmac_raw_hook_code[8] __attribute__((aligned(4)));
+
+static uint32_t m6ii_raw_packmode_addr(void)
+{
+    /* Sanity-check the known RAW writer before following its PackUnpack ID. */
+    uint32_t raw_mmio = MEM(M6II_DMACINFO_BASE + M6II_RAW_EDMAC_CHANNEL * 8u);
+    if (raw_mmio != RAW_LV_EDMAC_CHANNEL_ADDR)
+        return 0;
+
+    uint32_t puid = MEM(M6II_PACKUNPACK_ID_BASE + M6II_RAW_EDMAC_CHANNEL * 4u);
+    if (puid >= M6II_D8_CHANNEL_COUNT)
+        return 0;
+
+    /*
+     * DIGIC 8 PackUnpackInfo entries are 3 words:
+     *   [0] PackMode field pointer, [1] unknown, [2] mode flags.
+     */
+    uint32_t packmode = MEM(M6II_PACKUNPACK_INFO_BASE + puid * 12u);
+    if ((packmode & 3u) || packmode < 0x1000u || packmode >= 0x01000000u)
+        return 0;
+
+    /* Bilal's D8 mapping uses exactly 0/1/2 for 10/12/14-bit. */
+    if (MEM(packmode) > 2u)
+        return 0;
+
+    return packmode;
+}
+
+void edmac_raw_adjust_pitch(uint32_t channel, struct edmac_info *edmac_config)
+{
+    if (channel != M6II_RAW_EDMAC_CHANNEL || !edmac_config ||
+        !edmac_config->xb || !edmac_config->yb)
+    {
+        return;
+    }
+
+    uint32_t raw_pitch_14bpp = edmac_config->xb;
+    uint32_t width = raw_pitch_14bpp * 8u / 14u;
+    uint32_t pitch = width * raw_info.bits_per_pixel / 8u;
+
+    edmac_config->xb = pitch;
+}
+
+void __attribute__((noinline,naked,aligned(4)))
+raw_lv_setedmac_hook(void)
+{
+    asm volatile(
+        /* preserve caller state while changing only the config pointed to by r1 */
+        "push {r0-r11, lr}\n"
+        "sub  sp, #4\n"
+        "mov  r3, %0\n"
+        "blx  r3\n"
+        "add  sp, #4\n"
+        "pop  {r0-r11, lr}\n"
+
+        /* replay the validated first 8 bytes of M6II edmac_set_size */
+        "push {r4,r5,r6,r7,r8,r9,r10,r11,lr}\n"
+        "mov  r5, r0\n"
+        "movw r0, #0x8944\n"
+        "movt r0, #0xE100\n"
+
+        /* resume immediately after the 8-byte function hook */
+        "movw r3, #0x0977\n"
+        "movt r3, #0xE058\n"
+        "bx   r3\n"
+        :
+        : "r"(edmac_raw_adjust_pitch)
+        : "r3"
+    );
+}
+
+static int install_edmac_raw_patch(void)
+{
+    if (m6ii_edmac_raw_patch_installed)
+        return 0;
+
+    /*
+     * Expected semantic prologue:
+     *   push.w {r4-r11,lr}
+     *   mov    r5,r0
+     *   ldr    r0,[pc,#imm]   ; -> M6II_DMACINFO_BASE
+     *
+     * Decode and validate the literal rather than borrowing M50's bytes.
+     */
+    uint32_t first_word = *(volatile uint32_t *)M6II_EDMAC_SET_SIZE_ADDR;
+    uint16_t mov_r5_r0  = *(volatile uint16_t *)(M6II_EDMAC_SET_SIZE_ADDR + 4u);
+    uint16_t ldr_lit    = *(volatile uint16_t *)(M6II_EDMAC_SET_SIZE_ADDR + 6u);
+
+    if (first_word != 0x4FF0E92Du || mov_r5_r0 != 0x4605u ||
+        (ldr_lit & 0xF800u) != 0x4800u || (ldr_lit & 0x0700u) != 0)
+    {
+        return 1;
+    }
+
+    uint32_t ldr_pc = (M6II_EDMAC_SET_SIZE_ADDR + 6u + 4u) & ~3u;
+    uint32_t literal_addr = ldr_pc + ((ldr_lit & 0xFFu) << 2);
+    if (MEM(literal_addr) != M6II_DMACINFO_BASE)
+        return 1;
+
+    /* Also require a valid channel-3 PackMode pointer before patching Canon. */
+    if (!m6ii_raw_packmode_addr())
+        return 1;
+
+    struct function_hook_patch def = {
+        .patch_addr = M6II_EDMAC_SET_SIZE_ADDR,
+        .target_function_addr = (uint32_t)raw_lv_setedmac_hook,
+        .description = "M6II RAW EDMAC pitch"
+    };
+
+    for (uint32_t i = 0; i < 8u; i++)
+        def.orig_content[i] = *(volatile uint8_t *)(M6II_EDMAC_SET_SIZE_ADDR + i);
+
+    memset(m6ii_edmac_raw_patches, 0, sizeof(m6ii_edmac_raw_patches));
+    memset(m6ii_edmac_raw_hook_code, 0, sizeof(m6ii_edmac_raw_hook_code));
+
+    if (convert_f_patch_to_patch(
+            &def,
+            &m6ii_edmac_raw_patches[0],
+            &m6ii_edmac_raw_hook_code[0]) != E_PATCH_OK)
+    {
+        return 1;
+    }
+
+    if (apply_patches(m6ii_edmac_raw_patches, 1) != E_PATCH_OK)
+        return 1;
+
+    m6ii_edmac_raw_patch_installed = 1;
+    return 0;
+}
+
+static void remove_edmac_raw_patch(void)
+{
+    if (!m6ii_edmac_raw_patch_installed)
+        return;
+
+    unpatch_memory(M6II_EDMAC_SET_SIZE_ADDR);
+    m6ii_edmac_raw_patch_installed = 0;
+}
+
+#else
+
+static int install_edmac_raw_patch(void) { return 1; }
+static void remove_edmac_raw_patch(void) { }
+
+#endif /* CONFIG_M6II */
+#endif /* CONFIG_EDMAC_RAW_PATCH */
+
 int raw_lv_settings_still_valid()
 {
     /* should be fast enough for vsync calls */
     if (!lv_raw_enabled) return 0;
     int w, h;
     if (!raw_lv_get_resolution(&w, &h)) return 0;
+#if defined(CONFIG_M6II)
+    /*
+     * At 10/12-bit Canon's RAW writer pitch shrinks while spatial width does
+     * not. raw_lv_get_resolution() still interprets pitch as 14-bit, exactly
+     * as on Bilal's M50 port.
+     */
+    if (w != (raw_info.width * raw_info.bits_per_pixel) / 14 ||
+        h != raw_info.height)
+        return 0;
+#else
     if (w != raw_info.width || h != raw_info.height) return 0;
+#endif
     return 1;
 }
 #endif // CONFIG_RAW_LIVEVIEW
@@ -2488,6 +2675,9 @@ static void raw_lv_enable()
     //call("lv_set_raw_wp", 0);
 #endif
     call("lv_save_raw", 1);
+#ifdef CONFIG_EDMAC_RAW_PATCH
+    install_edmac_raw_patch();
+#endif
 #endif
 
 #ifdef DEFAULT_RAW_BUFFER
@@ -2530,6 +2720,9 @@ static void raw_lv_disable()
 
 #ifndef CONFIG_EDMAC_RAW_SLURP
     call("lv_save_raw", 0);
+#ifdef CONFIG_EDMAC_RAW_PATCH
+    remove_edmac_raw_patch();
+#endif
 #endif
 
 #ifdef CONFIG_ALLOCATE_RAW_LV_BUFFER
@@ -2659,33 +2852,63 @@ void raw_lv_request_bpp(int bpp)
 //            MODE_12BIT = 0x2000, // possibly 24 bit?
         };
     #elif defined(CONFIG_DIGIC_VIII)
-        enum { // wrong, copy of 200d
+        #if defined(CONFIG_M6II)
+        enum {
+            MODE_16BIT = 0x2, /* unknown; keep 14-bit behavior */
+            MODE_14BIT = 0x2,
+            MODE_12BIT = 0x1,
+            MODE_10BIT = 0x0,
+        };
+        uint32_t PACK32_MODE = m6ii_raw_packmode_addr();
+
+        /*
+         * 10/12-bit is only safe when both pieces of Bilal's fix are active:
+         * PackMode and the Canon RAW-writer pitch hook.
+         */
+        if (!PACK32_MODE || (bpp < 14 && !m6ii_edmac_raw_patch_installed))
+        {
+            give_semaphore(raw_sem);
+            return;
+        }
+        #else
+        enum { /* unsupported generic D8 fallback */
             MODE_16BIT = 0x20,
             MODE_14BIT = 0x20,
             MODE_12BIT = 0x10,
-            MODE_10BIT =  0x0,
+            MODE_10BIT = 0x0,
         };
-	    // idk how this works on D8. Set constant, but immediately return.
-	    const uint32_t PACK32_MODE = 0xd0008094; // wrong, copy of 200d
+        const uint32_t PACK32_MODE = 0xd0008094;
         give_semaphore(raw_sem);
         return;
+        #endif
     #endif
     const uint32_t modes[] = { MODE_10BIT, MODE_12BIT, MODE_14BIT, MODE_16BIT};
 
     int bpp_index = COERCE((bpp-10)/2, 0, COUNT(modes));
 
+    #if defined(CONFIG_M6II)
+    if (MEM(PACK32_MODE) == modes[bpp_index])
+    #else
     if (shamem_read(PACK32_MODE) == modes[bpp_index])
+    #endif
     {
-        /* no change needed */
-        ASSERT(raw_info.bits_per_pixel == bpp);
-    }
-    else
-    {
-        EngDrvOut(PACK32_MODE, modes[bpp_index]);
+        /* no hardware change needed; keep metadata synchronized */
         raw_info.bits_per_pixel = bpp;
         raw_info.pitch = raw_info.width * raw_info.bits_per_pixel / 8;
         raw_info.frame_size = raw_info.pitch * raw_info.height;
-        /* fixme: after switching bit depth, EDMAC needs 1-2 frames to settle */
+    }
+    else
+    {
+        #if defined(CONFIG_M6II)
+        MEM(PACK32_MODE) = modes[bpp_index];
+        #else
+        EngDrvOut(PACK32_MODE, modes[bpp_index]);
+        #endif
+
+        raw_info.bits_per_pixel = bpp;
+        raw_info.pitch = raw_info.width * raw_info.bits_per_pixel / 8;
+        raw_info.frame_size = raw_info.pitch * raw_info.height;
+        /* after switching bit depth, let Canon's RAW writer settle */
         wait_lv_frames(2);
     }
 
