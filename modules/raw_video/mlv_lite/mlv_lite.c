@@ -3987,8 +3987,8 @@ cleanup:
         }
 
         ResumeLiveView();
-        redraw();
         raw_recording_state = RAW_IDLE;
+        redraw();
         mlv_rec_call_cbr(MLV_REC_EVENT_STOPPED, NULL);
     }
 }
