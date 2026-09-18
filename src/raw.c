@@ -2309,11 +2309,13 @@ static int install_edmac_raw_patch(void)
      *
      * Decode and validate the literal rather than borrowing M50's bytes.
      */
-    uint32_t first_word = *(volatile uint32_t *)M6II_EDMAC_SET_SIZE_ADDR;
+    /* The function starts at a 2-byte boundary; avoid an unaligned word load. */
+    uint16_t push_lo    = *(volatile uint16_t *)(M6II_EDMAC_SET_SIZE_ADDR + 0u);
+    uint16_t push_hi    = *(volatile uint16_t *)(M6II_EDMAC_SET_SIZE_ADDR + 2u);
     uint16_t mov_r5_r0  = *(volatile uint16_t *)(M6II_EDMAC_SET_SIZE_ADDR + 4u);
     uint16_t ldr_lit    = *(volatile uint16_t *)(M6II_EDMAC_SET_SIZE_ADDR + 6u);
 
-    if (first_word != 0x4FF0E92Du || mov_r5_r0 != 0x4605u ||
+    if (push_lo != 0xE92Du || push_hi != 0x4FF0u || mov_r5_r0 != 0x4605u ||
         (ldr_lit & 0xF800u) != 0x4800u || (ldr_lit & 0x0700u) != 0)
     {
         return 1;
