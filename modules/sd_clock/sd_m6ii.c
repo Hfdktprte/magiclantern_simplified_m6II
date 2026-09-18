@@ -55,6 +55,14 @@ static void m6ii_sd_dump_task(void *unused)
      * itself is not being captured.
      */
     int card_info_ret = call("DebugSTG_GetSDCardInfo");
+    msleep(100);
+
+    /*
+     * dumpf writes Canon/ML's internal DryosDebugMsg ring to logNNNN.log.
+     * The GetSDCardInfo output includes the SD-UHS1 speed/clock and
+     * supported access-mode/driver-strength lines we are reverse engineering.
+     */
+    call("dumpf");
 
     FILE *f = FIO_CreateFile("ML/LOGS/M6II_SD.LOG");
     if (!f)
@@ -70,6 +78,7 @@ static void m6ii_sd_dump_task(void *unused)
     my_fprintf(f, "M6II_IsUhs2Mode(B): err=%d value=%#x\n",
                mounted_uhs2_err, mounted_uhs2);
     my_fprintf(f, "DebugSTG_GetSDCardInfo ret=%d\n", card_info_ret);
+    my_fprintf(f, "Canon DryOS debug ring dumped with dumpf (logNNNN.log)\n");
 
     /*
      * M6II follows the generic single-SD-slot bootflags path and uses
@@ -93,7 +102,7 @@ static void m6ii_sd_dump_task(void *unused)
     FIO_CloseFile(f);
 
     DryosDebugMsg(0, 15, "M6II SD: diagnostic saved to ML/LOGS/M6II_SD.LOG");
-    NotifyBox(6000, "Saved ML/LOGS/M6II_SD.LOG");
+    NotifyBox(7000, "Saved M6II_SD.LOG + Canon debug log");
 
     m6ii_sd_test_busy = 0;
 }
