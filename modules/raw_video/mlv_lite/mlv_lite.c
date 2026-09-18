@@ -3988,7 +3988,17 @@ cleanup:
 
         ResumeLiveView();
         raw_recording_state = RAW_IDLE;
+
+        /*
+         * "Flushing buffers..." is drawn directly into ML's bitmap VRAM.
+         * On DIGIC 8, redraw() asks Canon to redraw its dialog but does not
+         * clear ML's bitmap layer, so the last flush message can remain until
+         * opening/closing the ML menu clears that layer.  Clear the ML bitmap
+         * explicitly once recording is fully idle, then redraw normal UI.
+         */
+        BMP_LOCK(clrscr();)
         redraw();
+
         mlv_rec_call_cbr(MLV_REC_EVENT_STOPPED, NULL);
     }
 }
