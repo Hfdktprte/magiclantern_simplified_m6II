@@ -1086,12 +1086,13 @@ int raw_update_params_work()
 
         #ifdef CONFIG_M6II
         /*
-         * Bring-up values inherited from the working M50 DIGIC 8 port.
-         * They are only used to identify a plausible optical-black region;
-         * final M6II active-area offsets will be calibrated from captured RAW.
+         * Test the complete Canon LiveView RAW frame on M6II.
+         * The previous 88/34 margins were inherited from M50 and were never
+         * calibrated on M6II; expose the full frame so the real active area
+         * can be measured from captured footage.
          */
-        skip_top    = 34;
-        skip_left   = 88;
+        skip_top    = 0;
+        skip_left   = 0;
         #endif
 
         dbg_printf("LV raw buffer: %x (%dx%d)\n", raw_info.buffer, width, height);
