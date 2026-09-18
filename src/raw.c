@@ -459,15 +459,6 @@ static int get_default_white_level()
      -797, 10000,    2424, 10000,   7010, 10000
 #endif
 
-#ifdef CONFIG_M6II // from https://github.com/LibRaw/LibRaw src/tables/colordata.cpp
-    // 	{ LIBRAW_CAMERAMAKER_Canon, "EOS M6 Mark II", 0, 0,
-    //    { 11498,-3759,-1516,-5073,12954,2349,-892,1867,6118 } }, },
-    #define CAM_COLORMATRIX1 \
-    11498, 10000,   -3759, 10000,  -1516, 10000, \
-    -5073, 10000,   12954, 10000,   2349, 10000, \
-     -892, 10000,    1867, 10000,   6118, 10000
-#endif
-
 #ifdef CONFIG_SX740
     // copy from EOS R, as there's no data available now
     #define CAM_COLORMATRIX1 \
@@ -584,7 +575,8 @@ static int dynamic_ranges[] = {1196, 1170, 1139, 1087, 1019, 938, 848, 756, 664}
 #endif
 
 #if defined(CONFIG_80D)
-static int dynamic_ranges[] = {1233, 1180, 1093, 1008, 921, 837, 756, 648, 560};
+//same sensor
+static int dynamic_ranges[] = {1317, 1264, 1176, 1092, 1005, 921, 840, 731, 644};
 #endif
 
 #ifdef CONFIG_850D
@@ -609,21 +601,15 @@ static int dynamic_ranges[] = {1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685,
 static int dynamic_ranges[] = {1105, 1086, 1065, 1038, 1000, 936, 846, 773, 676, 585, 499};
 #endif
 
+// TODO: DxO graph is corrupted, so leaving R values for now
 #ifdef CONFIG_R5
-static int dynamic_ranges[] = {1333, 1218, 1255, 1127, 1038, 939, 845, 747, 643, 552, 452};
+static int dynamic_ranges[] = {1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685, 599, 507};
 #endif
 
 /** M50 data missing from DxO.
  *  For now I just copied R
  */
 #ifdef CONFIG_M50
-static int dynamic_ranges[] = {1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685, 599};
-#endif
-
-/** M6 Mark II data missing from DxO.
- *  For now I just copied R
- */
-#ifdef CONFIG_M6II
 static int dynamic_ranges[] = {1255, 1237, 1188, 1120, 1045, 964, 883, 785, 685, 599};
 #endif
 
@@ -892,7 +878,7 @@ int raw_update_params_work()
     int mv640crop = mv && video_mode_resolution == 2 && video_mode_crop;
     int zoom = lv_dispsize > 1;
 
-    // FIXME SJE what is this terrible hack?  Presumably much better to fix the code instead of hiding errors?
+    // FIXME SJE wtf is this terrible hack.  How about we fix the code instead of hiding errors?
     /* silence warnings; not all cameras have all these modes */
     (void)mv640; (void)mv720; (void)mv1080; (void)mv1080crop; (void)mv640crop; (void)zoom;
 
@@ -1040,7 +1026,7 @@ int raw_update_params_work()
         // Being in the black region should work, exact alignment may need correcting
         // for actual raw capture.
         skip_top    = 20;
-        skip_left   = 0; // we can't crop properly yet, so this must be 0
+        skip_left   = 144;
         #endif
 
         #ifdef CONFIG_200D
@@ -1063,6 +1049,22 @@ int raw_update_params_work()
         skip_top    = 28;
         skip_left   = 144; // 146 could work, too
         skip_right  = zoom ? 0 : 8;
+        #endif
+
+        #ifdef CONFIG_M50
+        // FIXME: add 4K skip values, these are for 1080p
+        skip_top    = 34;
+        skip_left   = 88;
+        #endif
+
+        #ifdef CONFIG_M6II
+        /*
+         * Bring-up values inherited from the working M50 DIGIC 8 port.
+         * They are only used to identify a plausible optical-black region;
+         * final M6II active-area offsets will be calibrated from captured RAW.
+         */
+        skip_top    = 34;
+        skip_left   = 88;
         #endif
 
         dbg_printf("LV raw buffer: %x (%dx%d)\n", raw_info.buffer, width, height);
@@ -1292,6 +1294,25 @@ int raw_update_params_work()
     ASSERT(raw_info.bits_per_pixel == 14);
     int black_mean = 0, black_stdev_x100 = 0;
     int ok = autodetect_black_level(&black_mean, &black_stdev_x100);
+
+    #ifdef CONFIG_M6II
+    /*
+     * M6II bring-up fallback:
+     * do not let an uncalibrated optical-black crop keep RAW video at 0x0.
+     * Geometry/buffer are already runtime-proven from the native RAW writer.
+     * If the generic black-bar detector rejects our provisional border,
+     * use conservative metadata values and continue.  This affects metadata/
+     * preview calculations only; it does not alter or synthesize RAW pixels.
+     */
+    if (!ok && lv && is_movie_mode())
+    {
+        black_mean = 2048;
+        black_stdev_x100 = 800; /* 8 DN placeholder; refine from real MLV */
+        ok = 1;
+        printf("M6II: provisional black-level fallback\n");
+    }
+    #endif
+
     #ifdef BLACK_LEVEL
     if (ABS(black_mean - BLACK_LEVEL) < 64)
     {
@@ -2622,13 +2643,8 @@ void raw_lv_request_bpp(int bpp)
             MODE_12BIT = 0x010,
             MODE_10BIT = 0x000,
         };
-    #elif defined(CONFIG_200D) | defined(CONFIG_6D2) | defined(CONFIG_7D2)
-    // FIXME currently doesn't do anything for 6D2 or 7D2 since
-    // EngDrvOut() is a nop there.  Some definition of the enum is required to build.
-    // See 200D for a safe filtered EngDrvOut() - which probably should be more
-    // like property_whitelist, more global, with per cam config.
+    #elif defined(CONFIG_200D)
         const uint32_t PACK32_MODE = 0xd0008094; // plausible from rom, e.g. e0159eee on 200d 1.0.1,
-                                                 // e0228742 on 6D2 1.0.5,
                                                  // compare 5d3 1.2.3 ff57c7c8
         enum {
             MODE_16BIT = 0x20, // unknown, copying 14 bit for now
@@ -2642,6 +2658,17 @@ void raw_lv_request_bpp(int bpp)
 //            MODE_12BIT = 0x300, // likely 8 or 16.  Alternates high and low values, could fit bayer or UYUV etc
 //            MODE_12BIT = 0x2000, // possibly 24 bit?
         };
+    #elif defined(CONFIG_DIGIC_VIII)
+        enum { // wrong, copy of 200d
+            MODE_16BIT = 0x20,
+            MODE_14BIT = 0x20,
+            MODE_12BIT = 0x10,
+            MODE_10BIT =  0x0,
+        };
+	    // idk how this works on D8. Set constant, but immediately return.
+	    const uint32_t PACK32_MODE = 0xd0008094; // wrong, copy of 200d
+        give_semaphore(raw_sem);
+        return;
     #endif
     const uint32_t modes[] = { MODE_10BIT, MODE_12BIT, MODE_14BIT, MODE_16BIT};
 

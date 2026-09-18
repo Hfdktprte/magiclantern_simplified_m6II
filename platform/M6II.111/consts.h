@@ -61,7 +61,7 @@ IDLEHandler seems to be a goldmine of id -> name mapping... just a part of those
 2028 START_PLAYMENU_SPECIAL_SCENE
 
 202F START_MENU_FOLDER
-2030 START_MENU_MECHALESS_SETTING
+2030 START_MENU_MECHA
 
 2033 START_MENU_LIVESTREAMING_DISCONNECT
 
@@ -159,6 +159,21 @@ EC811[1]>VramState
 #define YUV422_LV_BUFFER_DISPLAY_ADDR DV_VRAM_PANEL
 #define YUV422_LV_PITCH               736 // Is it 736 or 720? No scalling on XCM but UI is 720, OutputChunk 736
 #define YUV422_HD_BUFFER_DMA_ADDR     0x0 // TODO: Fix it, null pointer!. It expects this to be shamem_read(some_DMA_ADDR)
+
+/* M6II 1.1.1 LiveView RAW destination EDMAC writer.
+ *
+ * Runtime census around lv_save_raw(1) proves logical channel 3:
+ *   DmacInfo[3]      = 0xD0420200 (WRITE, mode 0x00686411)
+ *   +0x50 yb_xb      = 0x07CF1864
+ *                      -> 2000 lines, 0x1864 bytes/line
+ *                      -> 3568 pixels at 14 bpp
+ *   +0xA0 ram_addr   = 0x64FEC488 in the captured test
+ *                      -> exactly matches Canon RAW state +0x58.
+ *
+ * This is the same D8 RAW-writer MMIO layout used by the M50/SX740/R ports,
+ * so generic raw.c can read geometry/buffer and redirect +0xA0 unchanged.
+ */
+#define RAW_LV_EDMAC_CHANNEL_ADDR 0xD0420200
 
 // At time of writing R uses here "DispOperator_PropertyMasterSetDisplayTurnOffOn (%d)"
 // but I already found that our code expects this to be display statobject state

@@ -343,6 +343,19 @@ static void mlv_snd_prepare_audio()
 {
     mlv_snd_in_sample_rate = mlv_snd_rates[mlv_snd_rate_sel];
 
+    /*
+     * M6II DIGIC 8 uses Canon's SoundDev/AStream recorder rather than the
+     * legacy ASIF register interface.  The native stream validator accepts
+     * 48 kHz, 16-bit stereo; m6ii_sounddev.c supplies the compatibility API.
+     */
+    if (is_camera("M6II", "1.1.1"))
+    {
+        mlv_snd_in_sample_rate = 48000;
+        mlv_snd_in_bits_per_sample = 16;
+        mlv_snd_in_channels = 2;
+        return;
+    }
+
     /* some models may need this */
     SoundDevActiveIn(0);
     
@@ -705,15 +718,11 @@ static unsigned int mlv_snd_init()
     mlv_snd_buffers_empty = (struct msg_queue *) msg_queue_create("mlv_snd_buffers_empty", MLV_SND_BLOCKS_PER_SLOT * MLV_SND_SLOTS);
     mlv_snd_buffers_done = (struct msg_queue *) msg_queue_create("mlv_snd_buffers_done", MLV_SND_BLOCKS_PER_SLOT * MLV_SND_SLOTS);
 
-    /* will the same menu work in both submenus? probably not */
-    if (menu_get_value_from_script("Movie", "RAW video") != INT_MIN)
-    {
-        menu_add("RAW video", mlv_snd_menu, COUNT(mlv_snd_menu));
-    }
-    else if (menu_get_value_from_script("Movie", "RAW video (MLV)") != INT_MIN)
-    {
-        menu_add("RAW video (MLV)", mlv_snd_menu, COUNT(mlv_snd_menu));
-    }
+    /* Register sound controls directly in the Movie tab.
+     * This avoids depending on the RAW video submenu having been created
+     * before mlv_snd is initialized.
+     */
+    menu_add("Movie", mlv_snd_menu, COUNT(mlv_snd_menu));
 
     trace_write(trace_ctx, "mlv_snd_init: done");
     

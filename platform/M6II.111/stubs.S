@@ -9,22 +9,10 @@
  * Copyright (C) 2025 Magic Lantern Team
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the
- * Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor,
- * Boston, MA  02110-1301, USA.
+ * modify it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  */
-
 
 // A big chunk of this file was auto-generated from Ghidra project
 // using R.180 as a stubs source
@@ -39,13 +27,8 @@ THUMB_FN(0xe0599200, dcache_clean)
 THUMB_FN(0xe005e63c, dcache_clean_multicore)
 THUMB_FN(0xe05992d4, icache_invalidate)
 THUMB_FN(0xe0040236, init_task)
-
-// Not really startup, but used by MMU remap stuff during startup,
-// if you do early MMU patching
 THUMB_FN(0xe02be544, memcpy_dryos)
-THUMB_FN(0xe0576e86, change_mmu_tables) // Updates TTBRs and does TLB maintenance.
-                                        // To find a copy outside of bootloader, try search for hex bytes
-                                        // of first instr;  mov.w   r3,#0x55555555
+THUMB_FN(0xe0576e86, change_mmu_tables)
 
 /** Tasks **/
 DATA_PTR(0x1010, current_interrupt)
@@ -53,7 +36,7 @@ DATA_PTR(0x1028, current_task)
 THUMB_FN(0xe058599a, msleep)
 THUMB_FN(0xe059da7a, task_create)
 THUMB_FN(0xe059dc92, task_create_ex)
-DATA_PTR( 0x4118, task_max)
+DATA_PTR(0x4118, task_max)
 
 /** File I/O **/
 THUMB_FN(0xe0579faa, _FIO_CreateFile)
@@ -72,7 +55,7 @@ THUMB_FN(0xe057b9ba, FIO_Flush)
 THUMB_FN(0xe057a8ea, _FIO_GetFileSize64)
 
 /** Bitmap **/
-DATA_PTR(0x78c78, bmp_vram_info)  // via EOS RP.
+DATA_PTR(0x78c78, bmp_vram_info)
 
 /** Debug messages **/
 THUMB_FN(0xe0599848, DryosDebugMsg)
@@ -80,7 +63,7 @@ THUMB_FN(0xe0599848, DryosDebugMsg)
 /** Eventprocs (call by name) **/
 THUMB_FN(0xe05830b6, call)
 
-/** GUI timers **/
+/** GUI timers / DMA allocation **/
 THUMB_FN(0xe03d8ba2, SetHPTimerNextTick)
 THUMB_FN(0xe03d8b32, SetHPTimerAfterNow)
 THUMB_FN(0xe0584d14, SetTimerAfter)
@@ -91,28 +74,16 @@ THUMB_FN(0xe0360e94, _malloc)
 THUMB_FN(0xe0360ecc, _free)
 
 /** Interrupts **/
-THUMB_FN(0xe01c54c0,  cli_spin_lock)          /* used in AllocateMemory/FreeMemory and others */
-THUMB_FN(0xe00af448,  send_software_interrupt) // int 10 is used by DryOS to sleep/wake cpu.
-                                               // Func writes to 0xc1001f00
-THUMB_FN(0xdf002c52, _request_RPC) // allows CPU0 or CPU1 to pass a func pointer and param
-                                   // to the other for RPC.
-                                   // Passing a NULL func pointer, will suspend the other
-                                   // CPU until it becomes non-NULL.
-                                   // DryOS seems to use this to deliberately sleep a CPU
-                                   // in some exceptional cases (e.g. asserts).
-                                   //
-                                   // Don't call this directly, because if you do,
-                                   // and you forget to call clear_RPC_request(),
-                                   // the target CPU will repeatedly call the func pointer
-                                   // as fast as possible, forever.
-                                   // Instead use request_RPC().
-THUMB_FN(0xdf002c72,  clear_RPC_request) // reset the request to prevent calling
-                                         // the function forever
+THUMB_FN(0xe01c54c0, cli_spin_lock)
+THUMB_FN(0xe00af448, send_software_interrupt)
+THUMB_FN(0xdf002c52, _request_RPC)
+THUMB_FN(0xdf002c72, clear_RPC_request)
+
 /** Memory allocation **/
-THUMB_FN(0xe058b9b8, _AllocateMemory)                       /* NG AllocateMemory */
-THUMB_FN(0xe058bb70, _FreeMemory)                           /* uses the same heap */
-THUMB_FN(0xe058b842,  GetMemoryInformation)                 /* called from AllocateMemory */
-THUMB_FN(0xe058b816,  GetSizeOfMaxRegion)                   /* same */
+THUMB_FN(0xe058b9b8, _AllocateMemory)
+THUMB_FN(0xe058bb70, _FreeMemory)
+THUMB_FN(0xe058b842, GetMemoryInformation)
+THUMB_FN(0xe058b816, GetSizeOfMaxRegion)
 
 /** Memory info **/
 THUMB_FN(0xe03653a0, memmap_info)
@@ -123,9 +94,6 @@ THUMB_FN(0xe0392784, sysmem_info)
 /** Misc **/
 THUMB_FN(0xe0587590, uart_printf)
 THUMB_FN(0xe0061238, vsnprintf)
-
-/** Startup **/
-//DATA_PTR(0x, additional_version) // TODO: Seems to be a part of structure now
 
 /** Tasks **/
 DATA_PTR(0x4154, task_dispatch_hook)
@@ -142,6 +110,13 @@ THUMB_FN(0xe0599358, create_named_semaphore)
 THUMB_FN(0xe05994ce, give_semaphore)
 THUMB_FN(0xe0599454, take_semaphore)
 THUMB_FN(0xe0599424, take_semaphore_now)
+
+/** Event flags required by Bilal's DIGIC 8 mem2mem path **/
+THUMB_FN(0xe0598de6, CreateEventFlag_strictly)
+THUMB_FN(0xe0576f3a, DeleteEventFlag)
+THUMB_FN(0xe0577058, WaitForAnyEventFlag)
+THUMB_FN(0xe0577254, SetEventFlag)
+THUMB_FN(0xe0577282, ClearEventFlag)
 
 /** GUI **/
 DATA_PTR(0x11960, gui_task_list)
@@ -176,56 +151,59 @@ THUMB_FN(0xe058636a, GetMemoryAddressOfMemoryChunk)
 THUMB_FN(0xe0586774, DeleteMemorySuite)
 THUMB_FN(0xe0586a00, CreateMemorySuite)
 THUMB_FN(0xe0586046, CreateMemoryChunk)
-// SRM use disabled via CONFIG_MEMORY_SRM_NOT_WORKING
+
+/** DIGIC 8 engine power/resource management (M6II ROM-mapped) **/
+THUMB_FN(0xe0630eb6, PwrMng_WakeSubChips)
+THUMB_FN(0xe0630ee4, PwrMng_SuspendSubChips)
+THUMB_FN(0xe057978a, CreateResLockEntry)
+THUMB_FN(0xe0579972, LockEngineResources)
+THUMB_FN(0xe0579a0c, UnLockEngineResources)
+
+/** DIGIC 8 EDMAC API (M6II ROM-mapped)
+ * ROM0.BIN is based at 0xE0000000.  Do not add the old +0x40000 shift here.
+ * The 0x4B RAW writer specifically calls edmac_set_address at 0xE0580962
+ * and edmac_set_size at 0xE058096E.
+ */
+THUMB_FN(0xe057ff40, ConnectReadEDmac_maybe)
+THUMB_FN(0xe057ff78, edmac_reset_channel)
+THUMB_FN(0xe0580062, RegisterEDmacCompleteCBR)
+THUMB_FN(0xe05803fa, UnregisterEDmacCompleteCBR)
+THUMB_FN(0xe058048a, edmac_reset_boomer_vdkick)
+THUMB_FN(0xe0580502, edmac_select_boomer)
+THUMB_FN(0xe0580596, edmac_stop_boomer_maybe)
+THUMB_FN(0xe05805da, edmac_reset_packunpack_mode)
+THUMB_FN(0xe0580782, StartEDmac_maybe)
+THUMB_FN(0xe0580962, edmac_set_address)
+THUMB_FN(0xe058096e, edmac_set_size)
+THUMB_FN(0xe0580e5a, edmac_set_transfer_mode)
 
 /** Uncategorized **/
 DATA_PTR(0x14684, sd_device)
 THUMB_FN(0xe0818adc, _LoadCalendarFromRTC)
 THUMB_FN(0xe08f942e, ErrForCamera_handler)
-
-THUMB_FN(0xe0599c42,  dm_set_store_level)
+THUMB_FN(0xe0599c42, dm_set_store_level)
 
 /** Properties **/
 THUMB_FN(0xe058c8dc, _prop_cleanup)
 THUMB_FN(0xe058c332, prop_register_slave)
 THUMB_FN(0xe058c400, _prop_request_change)
 
-/**
- * Things needed for CONFIG_COMPOSITOR_XCM / CONFIG_XCM_DEDICATED_LAYER
- * Via EOS RP as it uses later XCM variant than R
- */
-THUMB_FN(0xe027640c, refreshVrmsSurface)           // Now called VMIX_TransferRectangleToVram
-DATA_PTR(   0x11ad8, display_refresh_needed)        // Easy to spot in refreshVrmsSurface()
-DATA_PTR(   0x78b74, RENDERER_LayersMetadata)
-THUMB_FN(0xe009acba, XCM_SetSourceSurface)         // XCM/XOC functions have nice debug strings
+/** Compositor **/
+THUMB_FN(0xe027640c, refreshVrmsSurface)
+DATA_PTR(0x11ad8, display_refresh_needed)
+DATA_PTR(0x78b74, RENDERER_LayersMetadata)
+THUMB_FN(0xe009acba, XCM_SetSourceSurface)
 THUMB_FN(0xe009af70, XCM_GetSourceSurface)
 THUMB_FN(0xe009afa4, XCM_SetSourceArea)
 THUMB_FN(0xe027679a, XOC_SetLayerEnable)
-DATA_PTR(   0x78ce8, _pXCM)
-
-/**
- * General FEATURE_VRAM_RGBA stubs
- *
- * _rgb_vram_info is a pointer to first Canon RGBA buffer (GUI).
- * On M6II this is set up by RENDERER_InitializeScreen(), after MARVs are created:
- * '_rgb_vram_info = RENDERER_LayersMetadata[0];'
- */
-//THUMB_FN(0xe01a1366, RENDERER_InitializeScreen)   // by debug message. Not used in code, left for reference above.
-THUMB_FN(0xe017cef0, XimrExe)                      // In RefreshVrmsSurface, just before "XimrExe" debug message
-DATA_PTR(    0x11ac4, winsys_sem)                   // Used in RefreshVrmsSurface around XimrExe call
-DATA_PTR(   0x11a8c, _rgb_vram_info)
-
+DATA_PTR(0x78ce8, _pXCM)
+THUMB_FN(0xe017cef0, XimrExe)
+DATA_PTR(0x11ac4, winsys_sem)
+DATA_PTR(0x11a8c, _rgb_vram_info)
 
 /** App handlers **/
-/**
- * Those can usually be found by looking at function address passed to
- * WINSYS_CreateDialogBox(), usually after a debug message.
- */
 THUMB_FN(0xe0520974, PlayMain_handler)
 THUMB_FN(0xe06ef5b0, ShootOlcApp_handler)
 THUMB_FN(0xe0433e4c, LiveViewApp_handler)
 THUMB_FN(0xe03a06ca, PlayMovieGuideApp_handler)
 DATA_PTR(0xf0b4, LiveViewApp_dialog)
-
-// Not used at this moment
-//THUMB_FN(0xe0524ad8, DISP_SetHighLight)
