@@ -3593,22 +3593,28 @@ int liveview_display_idle()
         || !job_state_ready_to_take_pic()
         || menu_active_and_not_hidden()
         || mirror_down
-        || gui_state != GUISTATE_IDLE
-        #if defined(CONFIG_M6II)
-        /*
-         * M6II uses GUI request mode 0x8 for normal LiveView (documented in
-         * platform/M6II.111/consts.h). The generic <=3 test therefore rejects
-         * every normal M6II LiveView frame and disables zebra_should_run().
-         * Trust LiveViewApp_dialog below instead, which is the D6+ criterion.
-         */
-        #else
-        || CURRENT_GUI_MODE > 3
+        )
+        return 0;
+
+#if defined(CONFIG_M6II)
+    /*
+     * M6II consts document GUI request mode 0x8 as LiveView and 0xA as OLC;
+     * GUISTATE itself is explicitly marked unknown on this port. Do not apply
+     * the legacy gui_state==IDLE / CURRENT_GUI_MODE<=3 assumptions here.
+     * Mode 0 is also valid while Canon has no transient GUI request active.
+     */
+    if (CURRENT_GUI_MODE != 0 &&
+        CURRENT_GUI_MODE != 0x8 &&
+        CURRENT_GUI_MODE != 0xA)
+        return 0;
+#else
+    if (gui_state != GUISTATE_IDLE || CURRENT_GUI_MODE > 3
         #ifdef CURRENT_GUI_MODE_2
         || CURRENT_GUI_MODE_2 > 3
         #endif
-        #endif
         )
         return 0;
+#endif
 
 #ifdef CONFIG_DIGIC_678X
 /* For Digic 6 and up. Check if LiveViewApp dialog pointer is not null.
