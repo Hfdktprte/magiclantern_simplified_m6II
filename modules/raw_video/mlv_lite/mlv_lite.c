@@ -3961,6 +3961,28 @@ cleanup:
     if (card_index == 0) // avoid cleaning up twice on dual slot cams
     {
         take_semaphore(settings_sem, 0);
+
+#ifdef CONFIG_M6II
+        /*
+         * M6II keeps the channel-3 RAW destination we last programmed.
+         * During recording that destination alternates between the ML
+         * full-size buffer and Canon's own RAW buffer.  When recording stops,
+         * the vsync callback stops immediately, so the last destination may
+         * still be the ML buffer.  free_buffers() then releases that memory;
+         * the next recording would start from a stale RAW destination and
+         * ImageController can raise HEAD BUFFER FULL / ERR70.
+         *
+         * fullsize_buffers[1] is the original Canon RAW buffer saved by
+         * setup_buffers().  Hand the writer back to it before releasing any
+         * recording memory.  This uses the same redirect path used for every
+         * recorded frame; no new EDMAC programming mechanism is introduced.
+         */
+        if (fullsize_buffers[1])
+        {
+            raw_lv_redirect_edmac(fullsize_buffers[1]);
+        }
+#endif
+
         free_buffers();
         restore_bit_depth();
         give_semaphore(settings_sem);
