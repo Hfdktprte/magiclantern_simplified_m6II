@@ -67,99 +67,6 @@ static void m6ii_lowbit_set_error(const char *fmt, ...)
     va_end(ap);
 }
 
-static void m6ii_lowbit_write_log(uint32_t channels,
-                                  uint32_t puid_base,
-                                  uint32_t puid_addr,
-                                  uint32_t puid,
-                                  uint32_t pui_base,
-                                  uint32_t pui_addr,
-                                  uint32_t pack_engine)
-{
-    FILE *f = FIO_CreateFile("M6II_LOWBIT.LOG");
-    if (!f) return;
-
-    char line[512];
-    int len = snprintf(line, sizeof(line),
-        "M6II low-bit table diagnostic\n"
-        "DmacInfo=%08x\n"
-        "channels=%x\n"
-        "RAW_channel=%x\n"
-        "RAW_mmio=%08x\n"
-        "puid_base=%08x\n"
-        "puid_addr=%08x\n"
-        "puid=%08x\n"
-        "pui_base=%08x\n"
-        "pui_addr=%08x\n"
-        "pack_engine=%08x\n"
-        "raw_state=%08x\n"
-        "packmode_addr=%08x\n"
-        "packmode=%08x\n",
-        0xE1008944u,
-        channels,
-        3u,
-        MEM(0xE1008944u + 3u * 8u),
-        puid_base,
-        puid_addr,
-        puid,
-        pui_base,
-        pui_addr,
-        pack_engine,
-        0x00010970u,
-        0x000109E4u,
-        MEM(0x000109E4u));
-
-    FIO_WriteFile(f, line, len);
-    FIO_CloseFile(f);
-}
-
-static void m6ii_lowbit_dump_region(const char *name, uint32_t base, uint32_t size)
-{
-    uint8_t *buf = malloc(size);
-    if (!buf) return;
-
-    memcpy(buf, (void *)base, size);
-
-    FILE *f = FIO_CreateFile(name);
-    if (f)
-    {
-        FIO_WriteFile(f, buf, size);
-        FIO_CloseFile(f);
-    }
-
-    free(buf);
-}
-
-static void m6ii_lowbit_dump_roms(void)
-{
-    static int dumped = 0;
-    if (dumped) return;
-    dumped = 1;
-
-    /*
-     * Read-only snapshots for offline disassembly/table decoding.
-     * E0580000 contains the M6II EDMAC API including:
-     *   reset_packunpack_mode @ E05805DA
-     *   edmac_set_size        @ E058096E
-     *   set_transfer_mode     @ E0580E5A
-     *
-     * E1008700 spans PackUnpack/DmacInfo-related static tables around
-     * the proven DmacInfo base E1008944.
-     */
-    m6ii_lowbit_dump_region("M6II_E058.BIN",     0xE0580000u, 0x1200u);
-    m6ii_lowbit_dump_region("M6II_TABLES.BIN",   0xE1008700u, 0x1200u);
-    m6ii_lowbit_dump_region("M6II_D5B.BIN",      0x000D5800u, 0x2000u);
-    m6ii_lowbit_dump_region("M6II_EDMAC_RAM.BIN",0x0007D000u, 0x1000u);
-
-    /*
-     * M6II RAW-LV implementation previously identified from runtime code:
-     * helpers around 0x02285A6E read state[0x10/0x14], state+0x58 buffer,
-     * lv_save_raw stores state+0x40, and lv_set_mm stores state+0x44.
-     * Dump the surrounding caller plus the complete local state block so the
-     * live bit-depth selector can be traced from camera-native code.
-     */
-    m6ii_lowbit_dump_region("M6II_RAWCODE.BIN",  0x02284000u, 0x4000u);
-    m6ii_lowbit_dump_region("M6II_RAWSTATE.BIN", 0x00010900u, 0x0200u);
-}
 #else
 const char * raw_lv_bpp_error_string(void)
 {
@@ -2342,33 +2249,20 @@ int _raw_lv_get_iso_post_gain()
 
 #define M6II_RAW_EDMAC_CHANNEL          3u
 #define M6II_DMACINFO_BASE              0xE1008944u
-#define M6II_D8_CHANNEL_COUNT_MIN       76u
-#define M6II_D8_CHANNEL_COUNT_MAX       128u
 #define M6II_EDMAC_SET_SIZE_ADDR        0xE058096Eu
-#define M6II_EDMAC_SET_SIZE_RESUME      ((M6II_EDMAC_SET_SIZE_ADDR + 8u) | 1u)
 
 static int m6ii_edmac_raw_patch_installed = 0;
 static struct patch m6ii_edmac_raw_patches[1];
 static uint8_t m6ii_edmac_raw_hook_code[8] __attribute__((aligned(4)));
 
-/*
- * Runtime probe for the low-bit transition.  This is intentionally kept in
- * RAM and written to card only from raw_lv_request_bpp(), never from the
- * edmac_set_size hook / vsync path.
- */
+/* Used to verify that Canon's edmac_set_size path reached our hook. */
 static volatile uint32_t m6ii_edmac_raw_hook_calls = 0;
-static volatile uint32_t m6ii_edmac_raw_last_xb_in = 0;
-static volatile uint32_t m6ii_edmac_raw_last_xb_out = 0;
-static volatile uint32_t m6ii_edmac_raw_last_yb = 0;
-static volatile uint32_t m6ii_edmac_raw_last_bpp = 0;
-static volatile uint32_t m6ii_edmac_raw_forced_pitch_writes = 0;
 
 #define M6II_D8_CHANNEL_COUNT           76u
 #define M6II_PACKUNPACK_ID_BASE         0xE1008814u
 #define M6II_PACKUNPACK_INFO_BASE       0xE1008BA4u
 
 #define M6II_RAW_STATE_BASE              0x00010970u
-#define M6II_RAW_PACKCFG_OFFSET          0x6Cu
 #define M6II_RAW_PACKMODE_OFFSET         0x74u
 #define M6II_RAW_PACKMODE_ADDR           (M6II_RAW_STATE_BASE + M6II_RAW_PACKMODE_OFFSET)
 #define M6II_RAW_PACKUNPACK_MMIO         0xD0422200u
@@ -2412,16 +2306,6 @@ static uint32_t m6ii_raw_packmode_addr(void)
     uint32_t pui_addr = M6II_PACKUNPACK_INFO_BASE + puid * 12u;
     uint32_t pack_engine = MEM(pui_addr);
 
-    m6ii_lowbit_write_log(
-        M6II_D8_CHANNEL_COUNT,
-        M6II_PACKUNPACK_ID_BASE,
-        M6II_PACKUNPACK_ID_BASE + M6II_RAW_EDMAC_CHANNEL * 4u,
-        puid,
-        M6II_PACKUNPACK_INFO_BASE,
-        pui_addr,
-        pack_engine
-    );
-
     if (puid != 2u || pack_engine != M6II_RAW_PACKUNPACK_MMIO)
     {
         m6ii_lowbit_set_error("PUID=%x packMMIO=%08x expected 2/%08x",
@@ -2432,10 +2316,7 @@ static uint32_t m6ii_raw_packmode_addr(void)
     uint32_t raw_width = MEM(M6II_RAW_STATE_BASE + 0x10u);
     uint32_t raw_height = MEM(M6II_RAW_STATE_BASE + 0x14u);
     uint32_t raw_buffer = MEM(M6II_RAW_STATE_BASE + 0x58u);
-    uint32_t cfg0 = MEM(M6II_RAW_STATE_BASE + M6II_RAW_PACKCFG_OFFSET + 0x00u);
-    uint32_t cfg1 = MEM(M6II_RAW_STATE_BASE + M6II_RAW_PACKCFG_OFFSET + 0x04u);
     uint32_t packmode = MEM(M6II_RAW_PACKMODE_ADDR);
-    uint32_t cfg3 = MEM(M6II_RAW_STATE_BASE + M6II_RAW_PACKCFG_OFFSET + 0x0Cu);
 
     if (raw_width < 640u || raw_width > 10000u ||
         raw_height < 400u || raw_height > 10000u ||
@@ -2446,17 +2327,11 @@ static uint32_t m6ii_raw_packmode_addr(void)
         return 0;
     }
 
-    /*
-     * Bilal's D8 PackMode mapping is 2/1/0 for 14/12/10-bit.
-     * The surrounding words are included in the error to make any future
-     * Canon-state change obvious, but only PackMode itself is constrained:
-     * state+0x78 is known to change with lv_set_mm().
-     */
+    /* Bilal's D8 PackMode mapping is 2/1/0 for 14/12/10-bit. */
     if (packmode > 2u)
     {
-        m6ii_lowbit_set_error("RAW cfg %x,%x,%x,%x @ %08x",
-                              cfg0, cfg1, packmode, cfg3,
-                              M6II_RAW_PACKMODE_ADDR);
+        m6ii_lowbit_set_error("PackMode=%08x @ %08x",
+                              packmode, M6II_RAW_PACKMODE_ADDR);
         return 0;
     }
 
@@ -2476,22 +2351,12 @@ void edmac_raw_adjust_pitch(uint32_t channel, struct edmac_info *edmac_config)
     uint32_t pitch = width * raw_info.bits_per_pixel / 8u;
 
     m6ii_edmac_raw_hook_calls++;
-    m6ii_edmac_raw_last_xb_in = raw_pitch_14bpp;
-    m6ii_edmac_raw_last_xb_out = pitch;
-    m6ii_edmac_raw_last_yb = edmac_config->yb;
-    m6ii_edmac_raw_last_bpp = raw_info.bits_per_pixel;
-
     edmac_config->xb = pitch;
 }
 
-static void m6ii_lowbit_reset_hook_probe(void)
+static void m6ii_lowbit_reset_hook_counter(void)
 {
     m6ii_edmac_raw_hook_calls = 0;
-    m6ii_edmac_raw_last_xb_in = 0;
-    m6ii_edmac_raw_last_xb_out = 0;
-    m6ii_edmac_raw_last_yb = 0;
-    m6ii_edmac_raw_last_bpp = 0;
-    m6ii_edmac_raw_forced_pitch_writes = 0;
 }
 
 /*
@@ -2522,88 +2387,12 @@ static int m6ii_raw_force_live_pitch(void)
     {
         raw_lv_edmac->yb_xb =
             (yb_xb & 0xFFFF0000u) | (expected_pitch & 0xFFFFu);
-        m6ii_edmac_raw_forced_pitch_writes++;
-
         /* read back the MMIO write before trusting it */
         if ((raw_lv_edmac->yb_xb & 0xFFFFu) != expected_pitch)
             return 0;
     }
 
     return 1;
-}
-
-static void m6ii_lowbit_write_runtime_log(int requested_bpp)
-{
-    int detected_w = 0;
-    int detected_h = 0;
-    int detected_ok = raw_lv_get_resolution(&detected_w, &detected_h);
-
-    /*
-     * DIGIC 8 edmac_mmio:
-     *   yb_xb @ channel base + 0x50
-     *   yn_xn @ channel base + 0x54
-     */
-    uint32_t yb_xb = shamem_read(RAW_LV_EDMAC_CHANNEL_ADDR + 0x50u);
-    uint32_t yn_xn = shamem_read(RAW_LV_EDMAC_CHANNEL_ADDR + 0x54u);
-    uint32_t actual_pitch = yb_xb & 0xFFFFu;
-    uint32_t expected_pitch = raw_info.width * requested_bpp / 8u;
-    uint32_t expected_detected_w = raw_info.width * requested_bpp / 14u;
-
-    FILE *f = FIO_CreateFile("M6II_BPP.LOG");
-    if (!f) return;
-
-    char line[768];
-    int len = snprintf(line, sizeof(line),
-        "M6II low-bit runtime diagnostic\n"
-        "requested_bpp=%d\n"
-        "raw_info_bpp=%d\n"
-        "raw_info_width=%d\n"
-        "raw_info_height=%d\n"
-        "raw_info_pitch=%d\n"
-        "raw_info_frame_size=%d\n"
-        "packmode_addr=%08x\n"
-        "packmode=%08x\n"
-        "hook_installed=%d\n"
-        "hook_calls_after_request=%d\n"
-        "hook_last_bpp=%d\n"
-        "hook_last_xb_in=%d (0x%x)\n"
-        "hook_last_xb_out=%d (0x%x)\n"
-        "hook_last_yb=%d (0x%x)\n"
-        "forced_pitch_writes=%d\n"
-        "raw_edmac_yb_xb=%08x\n"
-        "raw_edmac_yn_xn=%08x\n"
-        "actual_pitch=%d (0x%x)\n"
-        "expected_pitch=%d (0x%x)\n"
-        "raw_lv_get_resolution_ok=%d\n"
-        "detected_w=%d\n"
-        "detected_h=%d\n"
-        "expected_detected_w=%d\n",
-        requested_bpp,
-        raw_info.bits_per_pixel,
-        raw_info.width,
-        raw_info.height,
-        raw_info.pitch,
-        raw_info.frame_size,
-        M6II_RAW_PACKMODE_ADDR,
-        MEM(M6II_RAW_PACKMODE_ADDR),
-        m6ii_edmac_raw_patch_installed,
-        m6ii_edmac_raw_hook_calls,
-        m6ii_edmac_raw_last_bpp,
-        m6ii_edmac_raw_last_xb_in, m6ii_edmac_raw_last_xb_in,
-        m6ii_edmac_raw_last_xb_out, m6ii_edmac_raw_last_xb_out,
-        m6ii_edmac_raw_last_yb, m6ii_edmac_raw_last_yb,
-        m6ii_edmac_raw_forced_pitch_writes,
-        yb_xb,
-        yn_xn,
-        actual_pitch, actual_pitch,
-        expected_pitch, expected_pitch,
-        detected_ok,
-        detected_w,
-        detected_h,
-        expected_detected_w);
-
-    FIO_WriteFile(f, line, len);
-    FIO_CloseFile(f);
 }
 
 /*
@@ -3345,8 +3134,6 @@ void raw_lv_request_bpp(int bpp)
         {
             if (bpp < 14 && !m6ii_lowbit_error[0])
                 m6ii_lowbit_set_error("PackMode pointer unresolved");
-            if (bpp < 14)
-                m6ii_lowbit_dump_roms();
             give_semaphore(raw_sem);
             return;
         }
@@ -3354,7 +3141,7 @@ void raw_lv_request_bpp(int bpp)
         uint32_t packmode_before = MEM(PACK32_MODE);
 
         if (bpp < 14)
-            m6ii_lowbit_reset_hook_probe();
+            m6ii_lowbit_reset_hook_counter();
 
         if (bpp < 14 && !m6ii_edmac_raw_patch_installed)
         {
@@ -3372,7 +3159,6 @@ void raw_lv_request_bpp(int bpp)
         if (bpp < 14 && packmode_before > 2u)
         {
             m6ii_lowbit_set_error("PackMode=%08x @ %08x", packmode_before, PACK32_MODE);
-            m6ii_lowbit_dump_roms();
             give_semaphore(raw_sem);
             return;
         }
@@ -3425,9 +3211,6 @@ void raw_lv_request_bpp(int bpp)
     #if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
     int pitch_ok = m6ii_raw_apply_writer_pitch(
         bpp, (uint32_t)modes[bpp_index]);
-
-    if (bpp < 14)
-        m6ii_lowbit_write_runtime_log(bpp);
 
     if (!pitch_ok && bpp < 14)
     {
