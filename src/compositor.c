@@ -170,6 +170,35 @@ extern uint32_t XOC_SetLayerEnable(int p1, int p2, uint layer, int p4);
  * Create a new VRAM (MARV) structure, alloc buffer for VRAM.
  * Call compositor to enable newly created layer.
  */
+int compositor_set_canon_layers_visible(int visible)
+{
+#ifdef CONFIG_COMPOSITOR_XCM_V2
+    /*
+     * compositor_layer_setup() allocates ML at the first free layer ID.
+     * Therefore every populated layer below _rgb_vram_layer_id belongs to
+     * Canon (GUI and, on some cameras, focus overlays).
+     */
+    if (!_pXCM || _rgb_vram_layer_id <= CANON_GUI_LAYER_ID)
+        return 0;
+
+    extern struct semaphore *winsys_sem;
+    if (winsys_sem)
+        take_semaphore(winsys_sem, 0);
+
+    for (int layer = CANON_GUI_LAYER_ID; layer < _rgb_vram_layer_id; layer++)
+        XOC_SetLayerEnable(0, 0, layer, visible ? 1 : 0);
+
+    if (winsys_sem)
+        give_semaphore(winsys_sem);
+
+    /* XimrExe is performed by the existing RGBA refresh task. */
+    _compositor_force_redraw();
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 int compositor_layer_setup()
 {
     // So far it seems that default GUI layer is always 0
