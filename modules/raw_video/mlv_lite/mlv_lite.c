@@ -161,6 +161,8 @@ static CONFIG_INT("raw.preview", preview_mode, 0);
 static CONFIG_INT("raw.warm.up", warm_up, 0);
 static CONFIG_INT("raw.use.srm.memory", use_srm_memory, 1);
 static CONFIG_INT("raw.small.hacks", small_hacks, 1);
+static CONFIG_INT("raw.killgd", kill_gd, 0);
+static volatile int raw_killgd_active = 0;
 
 static CONFIG_INT("raw.h264.proxy", h264_proxy_menu, 0);
 static CONFIG_INT("raw.sync_beep", sync_beep, 1);
@@ -306,6 +308,30 @@ static volatile int raw_recording_state = RAW_IDLE;
 #define RAW_IS_RECORDING (raw_recording_state == RAW_RECORDING || \
                           raw_recording_state == RAW_PRE_RECORDING)
 #define RAW_IS_FINISHING (raw_recording_state == RAW_FINISHING)
+
+/*
+ * Optional module API used by the M6II crop_rec preview port.
+ * This exports the exact rectangle mlv_lite will write, rather than asking
+ * another module to reverse-engineer framing from Canon LiveView.
+ */
+int mlv_lite_get_recording_rect(int *x, int *y, int *w, int *h, int *bpp)
+{
+    if (!raw_video_enabled || !lv || res_x <= 0 || res_y <= 0)
+        return 0;
+
+    if (x)   *x   = skip_x;
+    if (y)   *y   = skip_y;
+    if (w)   *w   = res_x;
+    if (h)   *h   = res_y;
+    if (bpp) *bpp = BPP;
+    return 1;
+}
+
+/* True only for the historical RAW-video "Kill Global Draw" optimization. */
+int mlv_lite_raw_zebra_exception_active(void)
+{
+    return raw_killgd_active && RAW_IS_RECORDING;
+}
 
 #define VIDF_HDR_SIZE 64
 
@@ -2176,6 +2202,22 @@ void FAST hack_liveview_vsync()
 static REQUIRES(RawRecTask)
 void hack_liveview(int unhack)
 {
+    /*
+     * Historical mlv_lite behavior: optionally suppress ML Global Draw for
+     * recording performance.  Keep this separate from Canon GUI suppression.
+     */
+    if (!unhack && kill_gd && !raw_killgd_active)
+    {
+        idle_globaldraw_dis();
+        clrscr();
+        raw_killgd_active = 1;
+    }
+    else if (unhack && raw_killgd_active)
+    {
+        idle_globaldraw_en();
+        raw_killgd_active = 0;
+    }
+
     if (small_hacks)
     {
         /* disable canon graphics (gains a little speed) */
@@ -4180,6 +4222,15 @@ static struct menu_entry raw_video_menu[] =
                 .advanced = 1,
             },
             {
+                .name = "Kill Global Draw",
+                .priv = &kill_gd,
+                .max = 1,
+                .choices = CHOICES("OFF", "ON"),
+                .help = "Disable normal ML Global Draw while RAW recording.",
+                .help2 = "Performance option. On M6II, crop_rec may keep only RAW zebras as an explicit exception.",
+                .advanced = 1,
+            },
+            {
                 .name = "Show graph",
                 .priv = &show_graph,
                 .choices = CHOICES("OFF", "Buffers", "Buffer usage"),
@@ -4669,6 +4720,7 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(preview_mode)
     MODULE_CONFIG(use_srm_memory)
     MODULE_CONFIG(small_hacks)
+    MODULE_CONFIG(kill_gd)
     MODULE_CONFIG(warm_up)
     MODULE_CONFIG(sync_beep)
     MODULE_CONFIG(output_format)
