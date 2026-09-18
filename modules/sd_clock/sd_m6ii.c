@@ -4,9 +4,11 @@
 #include <dryos.h>
 #include <menu.h>
 #include <fio-ml.h>
+#include <patch.h>
+#include <config.h>
 
 extern int M6II_SdCARDGetSpeed(uint32_t dev, uint32_t *speed, uint32_t *clock_selector);
-extern int M6II_FSUDevicePowerCycle(uint32_t storage_index);
+extern int M6II_SD_ReConfiguration(void);
 extern int M6II_DebugSTG_IsUHSCard(void);
 
 /*
@@ -99,103 +101,183 @@ static int m6ii_regs_match(const uint32_t *vals)
 }
 
 /*
- * Bilal calls Canon's generic SD_ReConfiguration() after installing his
- * setup hooks.  M6II has a generic FSU power-cycle wrapper at E007C8E2:
+ * Bilal/a1ex porting mechanism:
+ *  - hook immediately after Canon programs the SD controller registers,
+ *  - override them with uhs_vals[],
+ *  - call the no-argument SD_ReConfiguration() while card I/O is quiescent.
  *
- *   GetStgDev(storage_index)
- *   dev->control(dev + 0x10, 0x1004, 0)
- *
- * The same 0x1004 request is used by Canon's retry paths next to
- * "PowerCycle Fail!!".  This is a better D8 match for Bilal's generic
- * reconfiguration helper than calling the inner E00BA8CC routine directly.
+ * On M6II, every valid clock selector converges here immediately after
+ * 0xE012BA6C writes the 11-word D01006xx controller preset.
  */
-#define M6II_FSU_STGDEV_TABLE      0x000066E0
-#define M6II_FSU_DRIVE_LETTER_OFF  0x000000C4
+#define M6II_SD_POST_PRESET_HOOK 0xE012BEA4
 
-static int m6ii_find_sd_storage_index(uint32_t *obj_out, uint32_t *letter_out)
+static CONFIG_INT("sd.m6ii_bilal_boot_test", m6ii_bilal_boot_test, 0);
+
+static uint32_t m6ii_uhs_vals[11];
+static struct patch m6ii_bilal_hook_patch[1];
+static uint8_t m6ii_bilal_hook_code[8] __attribute__((aligned(4)));
+static int m6ii_bilal_hook_installed = 0;
+
+static volatile uint32_t m6ii_hook_calls = 0;
+static volatile uint32_t m6ii_hook_hits = 0;
+static volatile uint32_t m6ii_hook_last_dev = 0xffffffff;
+static volatile uint32_t m6ii_hook_last_selector = 0xffffffff;
+
+static int m6ii_boot_test_ran = 0;
+static int m6ii_boot_patch_rc = -1;
+static int m6ii_boot_reconfig_rc = -1;
+static int m6ii_boot_get_before = -1;
+static int m6ii_boot_get_after = -1;
+static int m6ii_boot_uhs_before = -1;
+static int m6ii_boot_uhs_after = -1;
+static uint32_t m6ii_boot_speed_before = 0xffffffff;
+static uint32_t m6ii_boot_clock_before = 0xffffffff;
+static uint32_t m6ii_boot_speed_after = 0xffffffff;
+static uint32_t m6ii_boot_clock_after = 0xffffffff;
+static int m6ii_boot_live_195 = 0;
+static uint32_t m6ii_boot_div = 0xffffffff;
+
+static void m6ii_bilal_post_preset_hook(uint32_t *regs, uint32_t *stack, uint32_t pc)
 {
-    for (int i = 0; i < 2; i++)
+    m6ii_hook_calls++;
+
+    /*
+     * SetSDClkFrequency keeps device in r5 and selector in r4 across
+     * the preset-writer call.  M6II SD is device 0.
+     */
+    uint32_t dev = regs[5];
+    uint32_t selector = regs[4];
+
+    m6ii_hook_last_dev = dev;
+    m6ii_hook_last_selector = selector;
+
+    if (dev == M6II_SD_DEVICE && selector == 9)
     {
-        uint32_t obj = MEM(M6II_FSU_STGDEV_TABLE + i * 4);
-        if (!obj)
-            continue;
+        /*
+         * Stock validation uses Canon's own 195-MHz values.
+         * Later, Bilal-style 160/192/240 D8 arrays will occupy this same
+         * uhs_vals[] buffer; the hook mechanism itself will not change.
+         */
+        for (int i = 0; i < COUNT(m6ii_uhs_regs); i++)
+            MEM(m6ii_uhs_regs[i]) = m6ii_uhs_vals[i];
 
-        uint32_t letter = MEM(obj + M6II_FSU_DRIVE_LETTER_OFF) & 0xFF;
-        if (letter == 'B')
-        {
-            if (obj_out) *obj_out = obj;
-            if (letter_out) *letter_out = letter;
-            return i;
-        }
+        m6ii_hook_hits++;
     }
-
-    if (obj_out) *obj_out = 0;
-    if (letter_out) *letter_out = 0;
-    return -1;
 }
 
-static void m6ii_bilal_fsu_stock_task(void *unused)
+static int m6ii_install_bilal_hook(void)
 {
-    uint32_t speed_before = 0xffffffff;
-    uint32_t clock_before = 0xffffffff;
-    uint32_t speed_after = 0xffffffff;
-    uint32_t clock_after = 0xffffffff;
-    uint32_t obj = 0;
-    uint32_t letter = 0;
-
-    int idx = m6ii_find_sd_storage_index(&obj, &letter);
-    int get_before = M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_before, &clock_before);
-    int uhs_before = M6II_DebugSTG_IsUHSCard();
-
-    if (idx < 0)
+    struct function_hook_patch def =
     {
-        NotifyBox(10000, "FSU SD object not found\ntable=%08x", M6II_FSU_STGDEV_TABLE);
-        m6ii_sd_test_busy = 0;
+        .patch_addr = M6II_SD_POST_PRESET_HOOK,
+        .target_function_addr = (uint32_t)m6ii_bilal_post_preset_hook,
+        .description = "sd_clock: M6II Bilal post-preset override",
+    };
+
+    static const uint8_t expected[8] =
+    {
+        0x05, 0x21, 0x28, 0x46, 0x11, 0xF3, 0xAE, 0xFE
+    };
+
+    for (int i = 0; i < 8; i++)
+        def.orig_content[i] = expected[i];
+
+    int err = convert_f_patch_to_patch(&def,
+                                      &m6ii_bilal_hook_patch[0],
+                                      &m6ii_bilal_hook_code[0]);
+    if (err != E_PATCH_OK)
+        return err;
+
+    err = apply_patches(m6ii_bilal_hook_patch, 1);
+    if (err == E_PATCH_OK)
+        m6ii_bilal_hook_installed = 1;
+
+    return err;
+}
+
+static void m6ii_remove_bilal_hook(void)
+{
+    if (!m6ii_bilal_hook_installed)
         return;
+
+    unpatch_memory(M6II_SD_POST_PRESET_HOOK);
+    m6ii_bilal_hook_installed = 0;
+}
+
+static void m6ii_run_startup_stock_validation(void)
+{
+    m6ii_boot_test_ran = 1;
+    m6ii_hook_calls = 0;
+    m6ii_hook_hits = 0;
+    m6ii_hook_last_dev = 0xffffffff;
+    m6ii_hook_last_selector = 0xffffffff;
+
+    m6ii_copy_words(m6ii_uhs_vals, m6ii_canon_195, 11);
+
+    m6ii_boot_get_before =
+        M6II_SdCARDGetSpeed(M6II_SD_DEVICE,
+                            &m6ii_boot_speed_before,
+                            &m6ii_boot_clock_before);
+    m6ii_boot_uhs_before = M6II_DebugSTG_IsUHSCard();
+
+    m6ii_boot_patch_rc = m6ii_install_bilal_hook();
+    if (m6ii_boot_patch_rc == E_PATCH_OK)
+    {
+        /*
+         * This is intentionally executed from module startup, matching
+         * Bilal's sd_uhs_init -> sd_overclock_task flow.  Do not move this
+         * back into a live menu action: SD_ReConfiguration is not thread-safe.
+         */
+        m6ii_boot_reconfig_rc = M6II_SD_ReConfiguration();
+
+        m6ii_boot_get_after =
+            M6II_SdCARDGetSpeed(M6II_SD_DEVICE,
+                                &m6ii_boot_speed_after,
+                                &m6ii_boot_clock_after);
+        m6ii_boot_uhs_after = M6II_DebugSTG_IsUHSCard();
+        m6ii_boot_live_195 = m6ii_regs_match(m6ii_canon_195);
+        m6ii_boot_div = MEM(0xD0100604);
+
+        m6ii_remove_bilal_hook();
     }
 
     /*
-     * Stock-only validation.  Do not alter any clock table or MMIO values.
-     * First prove that this is the D8 equivalent of Bilal's
-     * SD_ReConfiguration() and that it preserves normal SDR104/195 operation.
+     * One-shot in RAM.  After a successful boot/shutdown, config persistence
+     * should leave this disabled for the next startup.
      */
-    int reconfig_rc = M6II_FSUDevicePowerCycle((uint32_t)idx);
-    msleep(250);
-
-    int get_after = M6II_SdCARDGetSpeed(M6II_SD_DEVICE, &speed_after, &clock_after);
-    int uhs_after = M6II_DebugSTG_IsUHSCard();
-    int live_156 = m6ii_regs_match(m6ii_canon_156);
-    int live_195 = m6ii_regs_match(m6ii_canon_195);
-    uint32_t divider = MEM(0xD0100604);
+    m6ii_bilal_boot_test = 0;
 
     DryosDebugMsg(0, 15,
-                  "M6II Bilal FSU stock: idx=%d obj=%08x drive=%c rc=%d get=%d/%d %d/%d->%d/%d uhs=%d/%d live156=%d live195=%d div=%d",
-                  idx, obj, letter ? letter : '?', reconfig_rc,
-                  get_before, get_after,
-                  speed_before, clock_before, speed_after, clock_after,
-                  uhs_before, uhs_after, live_156, live_195, divider);
-
-    NotifyBox(15000,
-              "Bilal FSU stock\nidx=%d obj=%08x drive=%c\nrc=%d get=%d/%d\nlogical %d/%d -> %d/%d\nUHS=%d->%d live156=%d live195=%d div=%d",
-              idx, obj, letter ? letter : '?',
-              reconfig_rc, get_before, get_after,
-              speed_before, clock_before, speed_after, clock_after,
-              uhs_before, uhs_after, live_156, live_195, divider);
-
-    m6ii_sd_test_busy = 0;
+                  "M6II Bilal boot stock: patch=%d rc=%d get=%d/%d %d/%d->%d/%d UHS=%d/%d calls=%d hits=%d last=%d/%d live195=%d div=%d",
+                  m6ii_boot_patch_rc, m6ii_boot_reconfig_rc,
+                  m6ii_boot_get_before, m6ii_boot_get_after,
+                  m6ii_boot_speed_before, m6ii_boot_clock_before,
+                  m6ii_boot_speed_after, m6ii_boot_clock_after,
+                  m6ii_boot_uhs_before, m6ii_boot_uhs_after,
+                  m6ii_hook_calls, m6ii_hook_hits,
+                  m6ii_hook_last_dev, m6ii_hook_last_selector,
+                  m6ii_boot_live_195, m6ii_boot_div);
 }
 
-static MENU_SELECT_FUNC(m6ii_reconfig_stock)
+static MENU_SELECT_FUNC(m6ii_show_boot_result)
 {
-    if (m6ii_sd_test_busy)
+    if (!m6ii_boot_test_ran)
     {
-        NotifyBox(2000, "SD port test already running");
+        NotifyBox(7000,
+                  "No startup validation this boot.\nSet Boot stock validation=ON, then restart.");
         return;
     }
 
-    m6ii_sd_test_busy = 1;
-    task_create("m6ii_bilal_fsu", 0x1c, 0x1800,
-                m6ii_bilal_fsu_stock_task, 0);
+    NotifyBox(15000,
+              "Bilal boot stock\npatch=%d rc=%d get=%d/%d\nlogical %d/%d -> %d/%d\nUHS=%d->%d calls=%d hits=%d\nlast=%d/%d live195=%d div=%d",
+              m6ii_boot_patch_rc, m6ii_boot_reconfig_rc,
+              m6ii_boot_get_before, m6ii_boot_get_after,
+              m6ii_boot_speed_before, m6ii_boot_clock_before,
+              m6ii_boot_speed_after, m6ii_boot_clock_after,
+              m6ii_boot_uhs_before, m6ii_boot_uhs_after,
+              m6ii_hook_calls, m6ii_hook_hits,
+              m6ii_hook_last_dev, m6ii_hook_last_selector,
+              m6ii_boot_live_195, m6ii_boot_div);
 }
 
 static void m6ii_read_speed_task(void *unused)
@@ -278,9 +360,9 @@ static void m6ii_bilal_dump_task(void *unused)
      * pre-init wrapper visible in the log while its exact lifecycle is mapped.
      */
     my_fprintf(f, "\nROM anchors\n");
-    my_fprintf(f, "FSU generic power-cycle=E007C8E2 request=0x1004\n");
-    my_fprintf(f, "FSU StgDev table=000066E0 drive-letter offset=0xC4\n");
+    my_fprintf(f, "SD_ReConfiguration=E00BA8CC (no args)\n");
     my_fprintf(f, "D8 preset switch=E012BB44 writer=E012BA6C\n");
+    my_fprintf(f, "Bilal post-preset hook=E012BEA4\n");
 
     FIO_CloseFile(f);
 
@@ -320,11 +402,19 @@ static struct menu_entry m6ii_bilal_menu[] =
                 .help2 = "Stock M6II SDR104 has tested as speed=5, clock=9.",
             },
             {
-                .name = "Validate Bilal FSU reconfig",
-                .select = m6ii_reconfig_stock,
+                .name = "Boot stock validation",
+                .priv = &m6ii_bilal_boot_test,
+                .max = 1,
+                .choices = CHOICES("OFF", "ON next restart"),
+                .help = "Bilal-style one-shot stock validation during module startup.",
+                .help2 = "Set ON, then restart. No overclock values; uses Canon's 195MHz array.",
+            },
+            {
+                .name = "Show startup result",
+                .select = m6ii_show_boot_result,
                 .icon_type = IT_ACTION,
-                .help = "Run Canon's generic FSU 0x1004 card power-cycle with stock settings.",
-                .help2 = "No patches or OC values. Validates the D8 equivalent of Bilal's SD_ReConfiguration.",
+                .help = "Show the result captured by the Bilal startup validation.",
+                .help2 = "Includes hook calls/hits, UHS state, logical speed/clock and live preset match.",
             },
             {
                 .name = "Dump Bilal UHS tables",
@@ -344,6 +434,10 @@ unsigned int init_SD_M6II(void)
         return 0;
 
     menu_add("Prefs", m6ii_bilal_menu, COUNT(m6ii_bilal_menu));
+
+    if (m6ii_bilal_boot_test)
+        m6ii_run_startup_stock_validation();
+
     DryosDebugMsg(0, 15, "M6II: Bilal sd_uhs port diagnostics loaded");
 
     return 0;
