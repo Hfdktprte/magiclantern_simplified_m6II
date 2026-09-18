@@ -672,11 +672,18 @@ static unsigned int sd_uhs_init()
         return init_SD_PLL();
 
     /*
-     * M6II is DIGIC 8. Port Bilal's sd_uhs mechanism using the camera's
-     * D8 setup-mode preset writer/register block; never reuse D5 0xC04006xx.
+     * M6II has one MMU ROM-remap page.  The RAW branch reserves it for the
+     * low-bit EDMAC pitch hook; never let sd_clock install its competing
+     * post-preset ROM hook in that build.
      */
     if (is_camera("M6II", "1.1.1"))
+    {
+#ifdef CONFIG_EDMAC_RAW_PATCH
+        return 0;
+#else
         return init_SD_M6II();
+#endif
+    }
 
     // This cam has a DryOS func to autotune SD speed at runtime.
     // Doesn't need a restart.
