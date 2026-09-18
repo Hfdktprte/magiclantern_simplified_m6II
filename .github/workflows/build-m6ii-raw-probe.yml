@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - m6ii-raw-probe-v1
+      - m6ii-bilal-fps-v1
   workflow_dispatch:
 
 jobs:
@@ -40,7 +41,7 @@ jobs:
       - name: Upload SD-card package
         uses: actions/upload-artifact@v4
         with:
-          name: M6II-111-raw-probe-v1
+          name: M6II-111-${{ github.ref_name }}
           path: |
             platform/M6II.111/build/magiclantern.zip
             platform/M6II.111/build/magiclantern.zip.sha256
