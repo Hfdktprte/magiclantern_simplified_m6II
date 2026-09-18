@@ -2154,10 +2154,6 @@ static int compute_dynamic_range(int black_mean, int black_stdev_x100, int white
 
 #ifdef CONFIG_RAW_LIVEVIEW
 
-#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
-static int m6ii_raw_force_live_pitch(void);
-#endif
-
 static int lv_raw_enabled = 0;
 
 #ifdef CONFIG_EDMAC_RAW_SLURP
@@ -2170,13 +2166,6 @@ void FAST raw_lv_redirect_edmac(void* ptr)
     #ifdef CONFIG_EDMAC_RAW_SLURP
     redirected_raw_buffer = (void*) CACHEABLE(ptr);
     #else
-    #if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
-    /*
-     * Canon may rewrite 10-bit xb behind edmac_set_size.  Reassert the
-     * low-bit pitch immediately before redirecting the next RAW frame.
-     */
-    (void)m6ii_raw_force_live_pitch();
-    #endif
     raw_lv_edmac->ram_addr = (uint32_t)CACHEABLE(ptr);
     #endif
 }
