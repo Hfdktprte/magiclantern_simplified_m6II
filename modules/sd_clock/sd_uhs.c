@@ -671,8 +671,8 @@ static unsigned int sd_uhs_init()
         return init_SD_PLL();
 
     /*
-     * M6II is DIGIC 8. Do not expose or execute the old DIGIC 5
-     * 0xC04006xx overclock path. Use Canon's native storage code instead.
+     * M6II is DIGIC 8. Port Bilal's sd_uhs mechanism using the camera's
+     * D8 setup-mode preset writer/register block; never reuse D5 0xC04006xx.
      */
     if (is_camera("M6II", "1.1.1"))
         return init_SD_M6II();
