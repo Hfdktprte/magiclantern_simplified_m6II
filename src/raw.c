@@ -2340,6 +2340,17 @@ static int m6ii_edmac_raw_patch_installed = 0;
 static struct patch m6ii_edmac_raw_patches[1];
 static uint8_t m6ii_edmac_raw_hook_code[8] __attribute__((aligned(4)));
 
+/*
+ * Runtime probe for the low-bit transition.  This is intentionally kept in
+ * RAM and written to card only from raw_lv_request_bpp(), never from the
+ * edmac_set_size hook / vsync path.
+ */
+static volatile uint32_t m6ii_edmac_raw_hook_calls = 0;
+static volatile uint32_t m6ii_edmac_raw_last_xb_in = 0;
+static volatile uint32_t m6ii_edmac_raw_last_xb_out = 0;
+static volatile uint32_t m6ii_edmac_raw_last_yb = 0;
+static volatile uint32_t m6ii_edmac_raw_last_bpp = 0;
+
 #define M6II_D8_CHANNEL_COUNT           76u
 #define M6II_PACKUNPACK_ID_BASE         0xE1008814u
 #define M6II_PACKUNPACK_INFO_BASE       0xE1008BA4u
@@ -2452,7 +2463,94 @@ void edmac_raw_adjust_pitch(uint32_t channel, struct edmac_info *edmac_config)
     uint32_t width = raw_pitch_14bpp * 8u / 14u;
     uint32_t pitch = width * raw_info.bits_per_pixel / 8u;
 
+    m6ii_edmac_raw_hook_calls++;
+    m6ii_edmac_raw_last_xb_in = raw_pitch_14bpp;
+    m6ii_edmac_raw_last_xb_out = pitch;
+    m6ii_edmac_raw_last_yb = edmac_config->yb;
+    m6ii_edmac_raw_last_bpp = raw_info.bits_per_pixel;
+
     edmac_config->xb = pitch;
+}
+
+static void m6ii_lowbit_reset_hook_probe(void)
+{
+    m6ii_edmac_raw_hook_calls = 0;
+    m6ii_edmac_raw_last_xb_in = 0;
+    m6ii_edmac_raw_last_xb_out = 0;
+    m6ii_edmac_raw_last_yb = 0;
+    m6ii_edmac_raw_last_bpp = 0;
+}
+
+static void m6ii_lowbit_write_runtime_log(int requested_bpp)
+{
+    int detected_w = 0;
+    int detected_h = 0;
+    int detected_ok = raw_lv_get_resolution(&detected_w, &detected_h);
+
+    /*
+     * DIGIC 8 edmac_mmio:
+     *   yb_xb @ channel base + 0x50
+     *   yn_xn @ channel base + 0x54
+     */
+    uint32_t yb_xb = shamem_read(RAW_LV_EDMAC_CHANNEL_ADDR + 0x50u);
+    uint32_t yn_xn = shamem_read(RAW_LV_EDMAC_CHANNEL_ADDR + 0x54u);
+    uint32_t actual_pitch = yb_xb & 0xFFFFu;
+    uint32_t expected_pitch = raw_info.width * requested_bpp / 8u;
+    uint32_t expected_detected_w = raw_info.width * requested_bpp / 14u;
+
+    FILE *f = FIO_CreateFile("M6II_BPP.LOG");
+    if (!f) return;
+
+    char line[768];
+    int len = snprintf(line, sizeof(line),
+        "M6II low-bit runtime diagnostic\n"
+        "requested_bpp=%d\n"
+        "raw_info_bpp=%d\n"
+        "raw_info_width=%d\n"
+        "raw_info_height=%d\n"
+        "raw_info_pitch=%d\n"
+        "raw_info_frame_size=%d\n"
+        "packmode_addr=%08x\n"
+        "packmode=%08x\n"
+        "hook_installed=%d\n"
+        "hook_calls_after_request=%u\n"
+        "hook_last_bpp=%u\n"
+        "hook_last_xb_in=%u (0x%x)\n"
+        "hook_last_xb_out=%u (0x%x)\n"
+        "hook_last_yb=%u (0x%x)\n"
+        "raw_edmac_yb_xb=%08x\n"
+        "raw_edmac_yn_xn=%08x\n"
+        "actual_pitch=%u (0x%x)\n"
+        "expected_pitch=%u (0x%x)\n"
+        "raw_lv_get_resolution_ok=%d\n"
+        "detected_w=%d\n"
+        "detected_h=%d\n"
+        "expected_detected_w=%u\n",
+        requested_bpp,
+        raw_info.bits_per_pixel,
+        raw_info.width,
+        raw_info.height,
+        raw_info.pitch,
+        raw_info.frame_size,
+        M6II_RAW_PACKMODE_ADDR,
+        MEM(M6II_RAW_PACKMODE_ADDR),
+        m6ii_edmac_raw_patch_installed,
+        m6ii_edmac_raw_hook_calls,
+        m6ii_edmac_raw_last_bpp,
+        m6ii_edmac_raw_last_xb_in, m6ii_edmac_raw_last_xb_in,
+        m6ii_edmac_raw_last_xb_out, m6ii_edmac_raw_last_xb_out,
+        m6ii_edmac_raw_last_yb, m6ii_edmac_raw_last_yb,
+        yb_xb,
+        yn_xn,
+        actual_pitch, actual_pitch,
+        expected_pitch, expected_pitch,
+        detected_ok,
+        detected_w,
+        detected_h,
+        expected_detected_w);
+
+    FIO_WriteFile(f, line, len);
+    FIO_CloseFile(f);
 }
 
 void __attribute__((noinline,naked,aligned(4)))
@@ -3090,6 +3188,9 @@ void raw_lv_request_bpp(int bpp)
 
         uint32_t packmode_before = MEM(PACK32_MODE);
 
+        if (bpp < 14)
+            m6ii_lowbit_reset_hook_probe();
+
         if (bpp < 14 && !m6ii_edmac_raw_patch_installed)
         {
             m6ii_lowbit_set_error("RAW pitch hook inactive");
@@ -3165,6 +3266,21 @@ void raw_lv_request_bpp(int bpp)
         /* after switching bit depth, let Canon's RAW writer settle */
         wait_lv_frames(2);
     }
+
+    #if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    /*
+     * The current symptom on M6II is a header-only MLV: recording starts,
+     * then raw_lv_settings_still_valid() rejects the first frame.  Capture
+     * the post-transition writer geometry here so we can distinguish:
+     *   - PackMode changed but the pitch hook never ran,
+     *   - the hook ran but modified the wrong geometry,
+     *   - both changed and the remaining mismatch is elsewhere.
+     * Only low-bit requests are logged, so the cleanup 14-bit restore does
+     * not overwrite the evidence.
+     */
+    if (bpp < 14)
+        m6ii_lowbit_write_runtime_log(bpp);
+    #endif
 
     give_semaphore(raw_sem);
 }
