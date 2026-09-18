@@ -53,6 +53,26 @@
 
 static struct semaphore * raw_sem = 0;
 
+#if defined(CONFIG_M6II)
+static char m6ii_lowbit_error[128] = "";
+const char * raw_lv_bpp_error_string(void)
+{
+    return m6ii_lowbit_error;
+}
+static void m6ii_lowbit_set_error(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(m6ii_lowbit_error, sizeof(m6ii_lowbit_error), fmt, ap);
+    va_end(ap);
+}
+#else
+const char * raw_lv_bpp_error_string(void)
+{
+    return "";
+}
+#endif
+
 /* whether to recompute all the raw parameters (1), or just use cached values(0) */
 static int dirty = 0;
 
@@ -2320,13 +2340,23 @@ static int install_edmac_raw_patch(void)
     if (push_lo != 0xE92Du || push_hi != 0x4FF0u || mov_r5_r0 != 0x4605u ||
         (ldr_lit & 0xF800u) != 0x4800u || (ldr_lit & 0x0700u) != 0)
     {
+#if defined(CONFIG_M6II)
+        m6ii_lowbit_set_error("hook sig %04x %04x %04x %04x",
+                              push_lo, push_hi, mov_r5_r0, ldr_lit);
+#endif
         return 1;
     }
 
     uint32_t ldr_pc = (M6II_EDMAC_SET_SIZE_ADDR + 6u + 4u) & ~3u;
     uint32_t literal_addr = ldr_pc + ((ldr_lit & 0xFFu) << 2);
     if (MEM(literal_addr) != M6II_DMACINFO_BASE)
+    {
+#if defined(CONFIG_M6II)
+        m6ii_lowbit_set_error("hook literal %08x != %08x",
+                              MEM(literal_addr), M6II_DMACINFO_BASE);
+#endif
         return 1;
+    }
 
     struct function_hook_patch def = {
         .patch_addr = M6II_EDMAC_SET_SIZE_ADDR,
@@ -2345,11 +2375,20 @@ static int install_edmac_raw_patch(void)
             &m6ii_edmac_raw_patches[0],
             &m6ii_edmac_raw_hook_code[0]) != E_PATCH_OK)
     {
+#if defined(CONFIG_M6II)
+        m6ii_lowbit_set_error("hook conversion failed");
+#endif
         return 1;
     }
 
-    if (apply_patches(m6ii_edmac_raw_patches, 1) != E_PATCH_OK)
+    int patch_err = apply_patches(m6ii_edmac_raw_patches, 1);
+    if (patch_err != E_PATCH_OK)
+    {
+#if defined(CONFIG_M6II)
+        m6ii_lowbit_set_error("hook apply failed: %x", patch_err);
+#endif
         return 1;
+    }
 
     m6ii_edmac_raw_patch_installed = 1;
     return 0;
@@ -2823,6 +2862,10 @@ void raw_lv_release()
 
 void raw_lv_request_bpp(int bpp)
 {
+#if defined(CONFIG_M6II)
+    if (bpp < 14)
+        m6ii_lowbit_error[0] = '\0';
+#endif
     take_semaphore(raw_sem, 0);
 
     /* raw bit depth setup is done from PACK32_MODE register (mask 0x131) */
@@ -2873,7 +2916,7 @@ void raw_lv_request_bpp(int bpp)
         if (!PACK32_MODE)
         {
             if (bpp < 14)
-                NotifyBox(5000, "M6II low-bit: PackMode pointer unresolved");
+                m6ii_lowbit_set_error("PackMode pointer unresolved");
             give_semaphore(raw_sem);
             return;
         }
@@ -2882,7 +2925,7 @@ void raw_lv_request_bpp(int bpp)
 
         if (bpp < 14 && !m6ii_edmac_raw_patch_installed)
         {
-            NotifyBox(5000, "M6II low-bit: RAW pitch hook inactive");
+            m6ii_lowbit_set_error("RAW pitch hook inactive");
             give_semaphore(raw_sem);
             return;
         }
@@ -2895,7 +2938,7 @@ void raw_lv_request_bpp(int bpp)
          */
         if (bpp < 14 && packmode_before > 2u)
         {
-            NotifyBox(7000, "M6II low-bit: PackMode %08x @ %08x", packmode_before, PACK32_MODE);
+            m6ii_lowbit_set_error("PackMode=%08x @ %08x", packmode_before, PACK32_MODE);
             give_semaphore(raw_sem);
             return;
         }
@@ -2939,7 +2982,8 @@ void raw_lv_request_bpp(int bpp)
         if (MEM(PACK32_MODE) != (uint32_t)modes[bpp_index])
         {
             if (bpp < 14)
-                NotifyBox(7000, "M6II low-bit: PackMode write rejected @ %08x", PACK32_MODE);
+                m6ii_lowbit_set_error("PackMode write rejected @ %08x; got %08x",
+                                      PACK32_MODE, MEM(PACK32_MODE));
             give_semaphore(raw_sem);
             return;
         }
