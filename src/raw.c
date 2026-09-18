@@ -90,7 +90,7 @@ static void m6ii_lowbit_write_log(uint32_t channels,
         "puid=%08x\n"
         "pui_base=%08x\n"
         "pui_addr=%08x\n"
-        "packmode_ptr=%08x\n",
+        "pack_engine=%08x\n",
         0xE1008944u,
         channels,
         3u,
@@ -2338,20 +2338,30 @@ static uint8_t m6ii_edmac_raw_hook_code[8] __attribute__((aligned(4)));
 #define M6II_PACKUNPACK_ID_BASE         0xE1008814u
 #define M6II_PACKUNPACK_INFO_BASE       0xE1008BA4u
 
+#define M6II_RAW_STATE_BASE              0x00010970u
+#define M6II_RAW_PACKCFG_OFFSET          0x6Cu
+#define M6II_RAW_PACKMODE_OFFSET         0x74u
+#define M6II_RAW_PACKMODE_ADDR           (M6II_RAW_STATE_BASE + M6II_RAW_PACKMODE_OFFSET)
+#define M6II_RAW_PACKUNPACK_MMIO         0xD0422200u
+
 static uint32_t m6ii_raw_packmode_addr(void)
 {
     /*
-     * M6II ROM disassembly proves the classic DIGIC-8 table relationship:
-     *   PackUnpackId   = E1008814 = DmacInfo - 0x130
-     *   DmacInfo       = E1008944
-     *   PackUnpackInfo = E1008BA4 = DmacInfo + 0x260
+     * The static DIGIC-8 tables identify the RAW writer and its pack/unpack
+     * engine, but the value Bilal changes on M50 is a low-RAM Canon state
+     * field, not the engine MMIO register.
      *
-     * Channel 3 maps to PUID 2, whose PackUnpackInfo entry is:
-     *   { 0xD0422200, 3, 1 }
+     * Camera dump / M6II 1.1.1 Canon code:
+     *   RAW state base                    = 0x00010970
+     *   frame writer passes state + 0x6C to channel-3 pack/unpack setup
+     *   state + 0x74                     = 2 in normal 14-bit LiveView RAW
      *
-     * 0xD0422200 is the associated pack/unpack MMIO engine, NOT the live
-     * PackMode RAM field Bilal writes on M50.  Until the M6II live field is
-     * identified from the low-RAM Canon implementation, refuse all writes.
+     * This is the same slot used by Bilal's M50 implementation:
+     *   M50 PackMode 0x127B4 == M50 RAW-state-family base + 0x74.
+     *
+     * Keep several independent runtime checks here.  If any of them stop
+     * matching (different firmware/mode or a bad reverse-engineering
+     * assumption), low-bit mode stays disabled rather than writing blindly.
      */
     uint32_t raw_mmio = MEM(M6II_DMACINFO_BASE + M6II_RAW_EDMAC_CHANNEL * 8u);
     if (raw_mmio != RAW_LV_EDMAC_CHANNEL_ADDR)
@@ -2362,6 +2372,12 @@ static uint32_t m6ii_raw_packmode_addr(void)
     }
 
     uint32_t puid = MEM(M6II_PACKUNPACK_ID_BASE + M6II_RAW_EDMAC_CHANNEL * 4u);
+    if (puid >= M6II_D8_CHANNEL_COUNT)
+    {
+        m6ii_lowbit_set_error("RAW PUID out of range: %x", puid);
+        return 0;
+    }
+
     uint32_t pui_addr = M6II_PACKUNPACK_INFO_BASE + puid * 12u;
     uint32_t pack_engine = MEM(pui_addr);
 
@@ -2375,9 +2391,45 @@ static uint32_t m6ii_raw_packmode_addr(void)
         pack_engine
     );
 
-    m6ii_lowbit_set_error("PUID=%x packMMIO=%08x; live PackMode unresolved",
-                          puid, pack_engine);
-    return 0;
+    if (puid != 2u || pack_engine != M6II_RAW_PACKUNPACK_MMIO)
+    {
+        m6ii_lowbit_set_error("PUID=%x packMMIO=%08x expected 2/%08x",
+                              puid, pack_engine, M6II_RAW_PACKUNPACK_MMIO);
+        return 0;
+    }
+
+    uint32_t raw_width = MEM(M6II_RAW_STATE_BASE + 0x10u);
+    uint32_t raw_height = MEM(M6II_RAW_STATE_BASE + 0x14u);
+    uint32_t raw_buffer = MEM(M6II_RAW_STATE_BASE + 0x58u);
+    uint32_t cfg0 = MEM(M6II_RAW_STATE_BASE + M6II_RAW_PACKCFG_OFFSET + 0x00u);
+    uint32_t cfg1 = MEM(M6II_RAW_STATE_BASE + M6II_RAW_PACKCFG_OFFSET + 0x04u);
+    uint32_t packmode = MEM(M6II_RAW_PACKMODE_ADDR);
+    uint32_t cfg3 = MEM(M6II_RAW_STATE_BASE + M6II_RAW_PACKCFG_OFFSET + 0x0Cu);
+
+    if (raw_width < 640u || raw_width > 10000u ||
+        raw_height < 400u || raw_height > 10000u ||
+        !raw_buffer)
+    {
+        m6ii_lowbit_set_error("RAW state invalid: %ux%u buf=%08x",
+                              raw_width, raw_height, raw_buffer);
+        return 0;
+    }
+
+    /*
+     * Bilal's D8 PackMode mapping is 2/1/0 for 14/12/10-bit.
+     * The surrounding words are included in the error to make any future
+     * Canon-state change obvious, but only PackMode itself is constrained:
+     * state+0x78 is known to change with lv_set_mm().
+     */
+    if (packmode > 2u)
+    {
+        m6ii_lowbit_set_error("RAW cfg %x,%x,%x,%x @ %08x",
+                              cfg0, cfg1, packmode, cfg3,
+                              M6II_RAW_PACKMODE_ADDR);
+        return 0;
+    }
+
+    return M6II_RAW_PACKMODE_ADDR;
 }
 
 void edmac_raw_adjust_pitch(uint32_t channel, struct edmac_info *edmac_config)
