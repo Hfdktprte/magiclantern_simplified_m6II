@@ -47,7 +47,28 @@ void mlv_fill_lens(mlv_lens_hdr_t *hdr, uint64_t start_timestamp)
 
     hdr->focalLength = lens_info.focal_len;
     hdr->focalDist = lens_info.focus_dist;
+
+#ifdef CONFIG_M6II
+    /*
+     * M6II DIGIC 8 exposure properties do not currently populate
+     * lens_info.aperture reliably.  LVAE ControlAv uses ML's standard
+     * 1/8-EV raw aperture encoding; convert it directly to f-number x100
+     * as required by the MLV LENS block.
+     */
+    int m6ii_raw_av = CONTROL_BV_AV & 0xFF;
+    if (m6ii_raw_av)
+    {
+        float m6ii_f = sqrtf(powf(2.0f, (m6ii_raw_av - 8.0f) / 8.0f));
+        hdr->aperture = (uint16_t)roundf(m6ii_f * 100.0f);
+    }
+    else
+    {
+        hdr->aperture = lens_info.aperture * 10;
+    }
+#else
     hdr->aperture = lens_info.aperture * 10;
+#endif
+
     hdr->stabilizerMode = lens_info.IS;
     hdr->lensID = lens_info.lens_id;
     hdr->autofocusMode = af_mode;
@@ -102,6 +123,41 @@ void mlv_fill_expo(mlv_expo_hdr_t *hdr, uint64_t start_timestamp)
     mlv_set_timestamp((mlv_hdr_t *)hdr, start_timestamp);
     hdr->blockSize = sizeof(mlv_expo_hdr_t);
 
+#ifdef CONFIG_M6II
+    /*
+     * M6II movie exposure metadata: use Canon's live LVAE controls.
+     * These fields use the same raw 1/8-EV Tv/Av/Sv encoding used by
+     * Magic Lantern's exposure code, while the older PROP_* path is only
+     * partially populated on this port.
+     */
+    int m6ii_raw_iso = CONTROL_BV_ISO & 0xFF;
+    int m6ii_raw_tv  = CONTROL_BV_TV  & 0xFF;
+
+    if (m6ii_raw_iso)
+    {
+        hdr->isoMode = 0;
+        hdr->isoValue = raw2iso(m6ii_raw_iso);
+        hdr->isoAnalog = m6ii_raw_iso;
+        hdr->digitalGain = 0;
+    }
+    else
+    {
+        hdr->isoMode = lens_info.iso ? 0 : 1;
+        hdr->isoValue = lens_info.iso ? lens_info.iso : lens_info.iso_auto;
+        hdr->isoAnalog = lens_info.iso_analog_raw;
+        hdr->digitalGain = lens_info.iso_digital_ev;
+    }
+
+    if (m6ii_raw_tv)
+    {
+        float m6ii_shutter_s = raw2shutterf(m6ii_raw_tv);
+        hdr->shutterValue = (uint32_t)roundf(m6ii_shutter_s * 1000000.0f);
+    }
+    else
+    {
+        hdr->shutterValue = (uint32_t)(1000.0f * (1000000.0f / (float)get_current_shutter_reciprocal_x1000()));
+    }
+#else
     /* iso is zero when auto-iso is enabled */
     if(lens_info.iso == 0)
     {
@@ -116,6 +172,7 @@ void mlv_fill_expo(mlv_expo_hdr_t *hdr, uint64_t start_timestamp)
     hdr->isoAnalog = lens_info.iso_analog_raw;
     hdr->digitalGain = lens_info.iso_digital_ev;
     hdr->shutterValue = (uint32_t)(1000.0f * (1000000.0f / (float)get_current_shutter_reciprocal_x1000()));
+#endif
 }
 
 void mlv_fill_rtci(mlv_rtci_hdr_t *hdr, uint64_t start_timestamp)
