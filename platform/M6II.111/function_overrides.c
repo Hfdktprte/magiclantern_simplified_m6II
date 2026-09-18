@@ -17,6 +17,7 @@
 #include <consts.h>
 #include <lens.h>
 #include <edmac.h>
+#include <patch.h>
 
 struct chs_entry
 {
@@ -131,3 +132,143 @@ void ErrCardForLVApp_handler(void)
 }
 
 void _engio_write(uint32_t* reg_list) { return; }
+
+
+/*
+ * M6II DIGIC-8 port of Bilal/a1ex SD UHS post-register-write hook.
+ *
+ * Canon SetSDClkFrequency() converges at E012BEA4 immediately after
+ * E012BA6C writes the selected 11-word D01006xx preset.  The original
+ * UHS porting method hooks immediately after Canon sets these registers
+ * and replaces them with uhs_vals[].
+ */
+#define M6II_SD_POST_PRESET_HOOK 0xE012BEA4u
+#define M6II_SD_DEVICE           0u
+
+static const uint32_t m6ii_bilal_sd_regs[11] =
+{
+    0xD0100600u, 0xD0100618u, 0xD010061Cu, 0xD0100620u,
+    0xD010062Cu, 0xD0100630u, 0xD0100624u, 0xD0100628u,
+    0xD0100638u, 0xD0100604u, 0xD010060Cu,
+};
+
+static volatile uint32_t m6ii_bilal_sd_vals[11];
+static volatile uint32_t m6ii_bilal_sd_calls = 0;
+static volatile uint32_t m6ii_bilal_sd_hits = 0;
+static volatile uint32_t m6ii_bilal_sd_last_dev = 0xffffffffu;
+static volatile uint32_t m6ii_bilal_sd_last_selector = 0xffffffffu;
+
+static struct patch m6ii_bilal_sd_patch[1];
+static uint8_t m6ii_bilal_sd_hook_code[8] __attribute__((aligned(4)));
+static int m6ii_bilal_sd_hook_installed = 0;
+
+void m6ii_bilal_sd_set_values(const uint32_t *vals)
+{
+    for (int i = 0; i < 11; i++)
+        m6ii_bilal_sd_vals[i] = vals[i];
+}
+
+void m6ii_bilal_sd_reset_stats(void)
+{
+    m6ii_bilal_sd_calls = 0;
+    m6ii_bilal_sd_hits = 0;
+    m6ii_bilal_sd_last_dev = 0xffffffffu;
+    m6ii_bilal_sd_last_selector = 0xffffffffu;
+}
+
+void m6ii_bilal_sd_get_stats(uint32_t *calls, uint32_t *hits,
+                             uint32_t *last_dev, uint32_t *last_selector)
+{
+    if (calls) *calls = m6ii_bilal_sd_calls;
+    if (hits) *hits = m6ii_bilal_sd_hits;
+    if (last_dev) *last_dev = m6ii_bilal_sd_last_dev;
+    if (last_selector) *last_selector = m6ii_bilal_sd_last_selector;
+}
+
+static void m6ii_bilal_sd_override(uint32_t dev, uint32_t selector)
+{
+    m6ii_bilal_sd_calls++;
+    m6ii_bilal_sd_last_dev = dev;
+    m6ii_bilal_sd_last_selector = selector;
+
+    if (dev == M6II_SD_DEVICE && selector == 9u)
+    {
+        for (int i = 0; i < 11; i++)
+            MEM(m6ii_bilal_sd_regs[i]) = m6ii_bilal_sd_vals[i];
+
+        m6ii_bilal_sd_hits++;
+    }
+}
+
+static void __attribute__((noinline,naked,aligned(4)))
+m6ii_bilal_sd_trampoline(void)
+{
+    asm volatile(
+        "push {r0-r12, lr}\n"
+        "mov  r0, r5\n"
+        "mov  r1, r4\n"
+        "mov  r3, %0\n"
+        "blx  r3\n"
+        "pop  {r0-r12, lr}\n"
+
+        /* replay displaced E012BEA4..E012BEAB */
+        "movs r1, #5\n"
+        "mov  r0, r5\n"
+        "movw r3, #0xDC09\n" /* E043DC08 | Thumb bit */
+        "movt r3, #0xE043\n"
+        "blx  r3\n"
+
+        /* resume at E012BEAC */
+        "movw r3, #0xBEAD\n"
+        "movt r3, #0xE012\n"
+        "bx   r3\n"
+        :
+        : "r"(m6ii_bilal_sd_override)
+        : "r3"
+    );
+}
+
+int m6ii_bilal_sd_install_hook(void)
+{
+    if (m6ii_bilal_sd_hook_installed)
+        return E_PATCH_OK;
+
+    struct function_hook_patch def =
+    {
+        .patch_addr = M6II_SD_POST_PRESET_HOOK,
+        .target_function_addr = (uint32_t)m6ii_bilal_sd_trampoline,
+        .description = "sd_clock: M6II Bilal post-preset override",
+    };
+
+    static const uint8_t expected[8] =
+    {
+        0x05, 0x21, 0x28, 0x46, 0x11, 0xF3, 0xAE, 0xFE
+    };
+
+    for (int i = 0; i < 8; i++)
+        def.orig_content[i] = expected[i];
+
+    int err = convert_f_patch_to_patch(&def,
+                                      &m6ii_bilal_sd_patch[0],
+                                      &m6ii_bilal_sd_hook_code[0]);
+    if (err != E_PATCH_OK)
+        return err;
+
+    err = apply_patches(m6ii_bilal_sd_patch, 1);
+    if (err == E_PATCH_OK)
+        m6ii_bilal_sd_hook_installed = 1;
+
+    return err;
+}
+
+int m6ii_bilal_sd_remove_hook(void)
+{
+    if (!m6ii_bilal_sd_hook_installed)
+        return E_PATCH_OK;
+
+    int err = unpatch_memory(M6II_SD_POST_PRESET_HOOK);
+    if (err == E_UNPATCH_OK)
+        m6ii_bilal_sd_hook_installed = 0;
+
+    return err;
+}
