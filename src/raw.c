@@ -73,7 +73,7 @@ static void m6ii_lowbit_write_log(uint32_t channels,
                                   uint32_t puid,
                                   uint32_t pui_base,
                                   uint32_t pui_addr,
-                                  uint32_t packmode)
+                                  uint32_t pack_engine)
 {
     FILE *f = FIO_CreateFile("M6II_LOWBIT.LOG");
     if (!f) return;
@@ -90,7 +90,10 @@ static void m6ii_lowbit_write_log(uint32_t channels,
         "puid=%08x\n"
         "pui_base=%08x\n"
         "pui_addr=%08x\n"
-        "pack_engine=%08x\n",
+        "pack_engine=%08x\n"
+        "raw_state=%08x\n"
+        "packmode_addr=%08x\n"
+        "packmode=%08x\n",
         0xE1008944u,
         channels,
         3u,
@@ -100,7 +103,10 @@ static void m6ii_lowbit_write_log(uint32_t channels,
         puid,
         pui_base,
         pui_addr,
-        packmode);
+        pack_engine,
+        0x00010970u,
+        0x000109E4u,
+        MEM(0x000109E4u));
 
     FIO_WriteFile(f, line, len);
     FIO_CloseFile(f);
@@ -2356,8 +2362,10 @@ static uint32_t m6ii_raw_packmode_addr(void)
      *   frame writer passes state + 0x6C to channel-3 pack/unpack setup
      *   state + 0x74                     = 2 in normal 14-bit LiveView RAW
      *
-     * This is the same slot used by Bilal's M50 implementation:
-     *   M50 PackMode 0x127B4 == M50 RAW-state-family base + 0x74.
+     * Bilal's M50 implementation writes a low-RAM PackMode field (0x127B4)
+     * with 2/1/0 for 14/12/10-bit.  In the M6II four-word block passed to
+     * channel-3 setup, the normal values are 0,1,2,0; state+0x74 is therefore
+     * the member whose live value already matches Bilal's 14-bit selector.
      *
      * Keep several independent runtime checks here.  If any of them stop
      * matching (different firmware/mode or a bad reverse-engineering
