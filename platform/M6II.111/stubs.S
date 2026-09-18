@@ -185,8 +185,10 @@ THUMB_FN(0xe057d62a, M6II_IsUhs2Mode)
 
 /* Canon UHS-I readback used while porting Bilal's sd_uhs mechanism. */
 THUMB_FN(0xe0179f06, M6II_SdCARDGetSpeed)
-/* Canon DEVICE_POWER_CYCLE helper: terminate -> SdDriverPowerOn -> post-state. */
-THUMB_FN(0xe00ba8cc, M6II_SD_ReConfiguration)
+/* Generic FSU storage power-cycle wrapper: GetStgDev(index) -> control(..., 0x1004, 0). */
+THUMB_FN(0xe007c8e2, M6II_FSUDevicePowerCycle)
+/* Canon debug UHS query; returns true for mounted UHS-I/UHS-II card. */
+THUMB_FN(0xe00fe57c, M6II_DebugSTG_IsUHSCard)
 
 /** Uncategorized **/
 DATA_PTR(0x14684, sd_device)
