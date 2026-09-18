@@ -2241,6 +2241,7 @@ int _raw_lv_get_iso_post_gain()
 #define M6II_EDMAC_SET_SIZE_ADDR        0xE058096Eu
 
 static int m6ii_edmac_raw_patch_installed = 0;
+static volatile uint32_t m6ii_lowbit_pitch_active = 0;
 static struct patch m6ii_edmac_raw_patches[1];
 static uint8_t m6ii_edmac_raw_hook_code[8] __attribute__((aligned(4)));
 
@@ -2359,6 +2360,18 @@ void __attribute__((noinline,naked,aligned(4)))
 raw_lv_setedmac_hook(void)
 {
     asm volatile(
+        /*
+         * M6II ImageController uses edmac_set_size globally.  Bilal's pitch
+         * callback is needed only for the RAW writer (channel 3) while 10/12
+         * bit is active.  Keep every other call, including all 14-bit and
+         * teardown traffic, on a minimal pass-through path.
+         */
+        "cmp  r0, #3\n"
+        "bne  1f\n"
+        "mov  r3, %1\n"
+        "ldr  r3, [r3]\n"
+        "cbz  r3, 1f\n"
+
         /* preserve caller state while changing only the config pointed to by r1 */
         "push {r0-r11, lr}\n"
         "sub  sp, #4\n"
@@ -2367,6 +2380,7 @@ raw_lv_setedmac_hook(void)
         "add  sp, #4\n"
         "pop  {r0-r11, lr}\n"
 
+        "1:\n"
         /* replay the validated first 8 bytes of M6II edmac_set_size */
         "push {r4,r5,r6,r7,r8,r9,r10,r11,lr}\n"
         "mov  r5, r0\n"
@@ -2378,8 +2392,8 @@ raw_lv_setedmac_hook(void)
         "movt r3, #0xE058\n"
         "bx   r3\n"
         :
-        : "r"(edmac_raw_adjust_pitch)
-        : "r3"
+        : "r"(edmac_raw_adjust_pitch), "r"(&m6ii_lowbit_pitch_active)
+        : "r3", "cc", "memory"
     );
 }
 
@@ -2821,6 +2835,9 @@ static void raw_lv_enable()
 static void raw_lv_disable()
 {
     ASSERT(!lv_raw_gain);
+#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    m6ii_lowbit_pitch_active = 0;
+#endif
     lv_raw_enabled = 0;
     raw_info.buffer = 0;
 
@@ -2933,6 +2950,15 @@ void raw_lv_request_bpp(int bpp)
 #endif
     take_semaphore(raw_sem, 0);
 
+#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    /*
+     * Never leave the global edmac_set_size hook armed across a bit-depth
+     * transition.  Re-arm it below only after the M6II PackMode mapping has
+     * been validated, and only for 10/12-bit.
+     */
+    m6ii_lowbit_pitch_active = 0;
+#endif
+
     /* raw bit depth setup is done from PACK32_MODE register (mask 0x131) */
     #if defined(CONFIG_DIGIC_45)
         const uint32_t PACK32_MODE = 0xC0F08094;
@@ -3024,6 +3050,10 @@ void raw_lv_request_bpp(int bpp)
 
     int bpp_index = COERCE((bpp-10)/2, 0, COUNT(modes));
 
+#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    m6ii_lowbit_pitch_active = (bpp < 14);
+#endif
+
     #if defined(CONFIG_M6II)
     if (MEM(PACK32_MODE) == modes[bpp_index])
     #else
@@ -3042,6 +3072,9 @@ void raw_lv_request_bpp(int bpp)
             if (bpp < 14)
                 m6ii_lowbit_set_error("PackMode write rejected @ %08x; got %08x",
                                       PACK32_MODE, MEM(PACK32_MODE));
+#if defined(CONFIG_EDMAC_RAW_PATCH)
+            m6ii_lowbit_pitch_active = 0;
+#endif
             give_semaphore(raw_sem);
             return;
         }
