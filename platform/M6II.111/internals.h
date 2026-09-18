@@ -31,8 +31,12 @@
 // include edmac-d8.c from platform dir
 #define CONFIG_EDMAC_MEMCPY_D8
 
-/* Bilal-style low-bit RAW support: patch Canon RAW writer pitch setup. */
-#define CONFIG_EDMAC_RAW_PATCH
+/*
+ * SD-overclock test branch: keep the single M6II MMU ROM-remap page free for
+ * Bilal's sd_uhs setup hook.  The low-bit RAW EDMAC ROM hook lives on the
+ * separate RAW branch and must not compete for the same remap page here.
+ */
+/* #define CONFIG_EDMAC_RAW_PATCH */
 
 /** Large total memory, leading to unusual memory mapping,
  * CACHEABLE / UNCACHEABLE changes
