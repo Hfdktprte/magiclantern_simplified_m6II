@@ -2393,10 +2393,18 @@ static void m6ii_lowbit_reset_hook_counter(void)
  */
 static int m6ii_raw_force_live_pitch(void)
 {
+    /*
+     * 12-bit has repeatedly shown a stable 5352-byte pitch after the hooked
+     * edmac_set_size call.  Do not touch its live EDMAC registers from vsync:
+     * an asynchronous repair here can race Canon ImageController and produce
+     * ERR70.  The direct MMIO workaround is retained only for the proven
+     * M6II 10-bit quirk where Canon restores xb to the 14-bit value without
+     * going through the hooked setter.
+     */
     if (!m6ii_lowbit_pitch_active ||
         !m6ii_edmac_raw_patch_installed ||
         !lv_raw_enabled || !lv ||
-        raw_info.bits_per_pixel >= 14 ||
+        raw_info.bits_per_pixel != 10 ||
         raw_info.width <= 0 || raw_info.height <= 0)
     {
         return 1;
@@ -2513,11 +2521,10 @@ static int m6ii_raw_apply_writer_pitch(int bpp, uint32_t expected_mode)
 
     /*
      * 10-bit on M6II may be restored to 14-bit by a Canon path that bypasses
-     * edmac_set_size.  Repair xb directly on the validated RAW MMIO channel.
-     * The same helper is also called at frame-validation/redirection time so
-     * a later Canon rewrite cannot make mlv_lite stop on the first frame.
+     * edmac_set_size.  Only 10-bit gets the direct-MMIO fallback; 12-bit must
+     * either remain correct after the hooked setter or fail safely.
      */
-    if (actual_pitch_after != expected_pitch && bpp < 14)
+    if (actual_pitch_after != expected_pitch && bpp == 10)
     {
         if (!m6ii_raw_force_live_pitch())
         {
