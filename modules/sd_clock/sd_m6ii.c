@@ -7,6 +7,16 @@
 
 extern int M6II_GetUHS2CardCapability(uint32_t dev, uint32_t *cap);
 extern int M6II_IsUhs2Mode(uint32_t drive_letter, uint32_t *is_uhs2);
+extern int M6II_SdChangeClockSpeed(uint32_t sd_handle, uint32_t clock_selector);
+extern int M6II_SdCARDGetSpeed(uint32_t sd_handle, uint32_t *speed, uint32_t *clock_selector);
+
+/*
+ * M6II ROM 1.1.1: the UHS-I setup function loads 0x0000e384 as its
+ * SD-driver state and passes state[0x14] to SdCARDGetSpeed and
+ * SdChangeClockSpeed.
+ */
+#define M6II_SD_DRIVER_STATE       0x0000e384
+#define M6II_SD_DRIVER_HANDLE_ADDR (M6II_SD_DRIVER_STATE + 0x14)
 
 struct m6ii_sd_device
 {
@@ -19,6 +29,112 @@ struct m6ii_sd_device
 extern struct m6ii_sd_device * const sd_device[];
 
 static volatile int m6ii_sd_test_busy = 0;
+
+
+static uint32_t m6ii_sd_handle(void)
+{
+    return MEM(M6II_SD_DRIVER_HANDLE_ADDR);
+}
+
+static int m6ii_sd_get_speed_clock(uint32_t *speed, uint32_t *clock)
+{
+    uint32_t handle = m6ii_sd_handle();
+    if (!handle)
+        return -1;
+
+    return M6II_SdCARDGetSpeed(handle, speed, clock);
+}
+
+static void m6ii_sd_speed_task(void *unused)
+{
+    uint32_t speed = 0xffffffff;
+    uint32_t clock = 0xffffffff;
+    uint32_t handle = m6ii_sd_handle();
+    int err = m6ii_sd_get_speed_clock(&speed, &clock);
+
+    DryosDebugMsg(0, 15,
+                  "M6II SD: handle=%08x speed=%d clock=%d err=%d",
+                  handle, speed, clock, err);
+    NotifyBox(7000, "SDR speed=%d clock=%d\nhandle=%08x err=%d",
+              speed, clock, handle, err);
+
+    m6ii_sd_test_busy = 0;
+}
+
+static void m6ii_sd_clock_task(void *arg)
+{
+    uint32_t wanted = (uint32_t)(uintptr_t)arg;
+    uint32_t before_speed = 0xffffffff;
+    uint32_t before_clock = 0xffffffff;
+    uint32_t after_speed = 0xffffffff;
+    uint32_t after_clock = 0xffffffff;
+    uint32_t handle = m6ii_sd_handle();
+
+    if (!handle)
+    {
+        NotifyBox(5000, "M6II SD handle is NULL");
+        m6ii_sd_test_busy = 0;
+        return;
+    }
+
+    int before_err = M6II_SdCARDGetSpeed(handle, &before_speed, &before_clock);
+    if (before_err)
+    {
+        NotifyBox(5000, "GetSpeed before failed: %d", before_err);
+        m6ii_sd_test_busy = 0;
+        return;
+    }
+
+    int set_err = M6II_SdChangeClockSpeed(handle, wanted);
+    msleep(50);
+    int after_err = M6II_SdCARDGetSpeed(handle, &after_speed, &after_clock);
+
+    DryosDebugMsg(0, 15,
+                  "M6II SD clock: %d/%d -> sel %d ret=%d -> %d/%d get=%d",
+                  before_speed, before_clock, wanted, set_err,
+                  after_speed, after_clock, after_err);
+
+    NotifyBox(9000,
+              "SD clock %d -> %d\nset=%d get=%d speed=%d",
+              before_clock, after_clock, set_err, after_err, after_speed);
+
+    m6ii_sd_test_busy = 0;
+}
+
+static MENU_SELECT_FUNC(m6ii_sd_read_speed)
+{
+    if (m6ii_sd_test_busy)
+    {
+        NotifyBox(2000, "SD test already running");
+        return;
+    }
+
+    m6ii_sd_test_busy = 1;
+    task_create("m6ii_sd_speed", 0x1c, 0x1000, m6ii_sd_speed_task, 0);
+}
+
+static void m6ii_sd_start_clock(uint32_t selector)
+{
+    if (m6ii_sd_test_busy)
+    {
+        NotifyBox(2000, "SD test already running");
+        return;
+    }
+
+    m6ii_sd_test_busy = 1;
+    task_create("m6ii_sd_clock", 0x1c, 0x1000,
+                m6ii_sd_clock_task, (void *)(uintptr_t)selector);
+}
+
+static MENU_SELECT_FUNC(m6ii_sd_clock_156)
+{
+    m6ii_sd_start_clock(8);
+}
+
+static MENU_SELECT_FUNC(m6ii_sd_clock_stock)
+{
+    m6ii_sd_start_clock(9);
+}
 
 
 static void m6ii_sd_uhs1_task(void *unused)
@@ -235,25 +351,32 @@ static struct menu_entry m6ii_sd_test_menu[] =
                 .help2 = "Read-only. Mirrors DebugSTG_CheckUHS2Mode from M6II 1.1.1 ROM.",
             },
             {
+                .name = "Read speed / clock",
+                .select = m6ii_sd_read_speed,
+                .icon_type = IT_ACTION,
+                .help = "Call Canon SdCARDGetSpeed on the live M6II SD driver.",
+                .help2 = "Stock UHS-I SDR104 is expected to report speed=3 clock=9.",
+            },
+            {
+                .name = "Test clock: 156 MHz",
+                .select = m6ii_sd_clock_156,
+                .icon_type = IT_ACTION,
+                .help = "Change only Canon's UHS-I clock selector from 9 to 8.",
+                .help2 = "Reversible validation step. Use Restore stock 195 MHz afterwards.",
+            },
+            {
+                .name = "Restore stock: 195 MHz",
+                .select = m6ii_sd_clock_stock,
+                .icon_type = IT_ACTION,
+                .help = "Restore Canon's stock SDR104 clock selector 9.",
+                .help2 = "M6II ROM maps selector 9 to 195 MHz.",
+            },
+            {
                 .name = "Save SD diagnostic",
                 .select = m6ii_sd_dump_state,
                 .icon_type = IT_ACTION,
                 .help = "Save mounted SD/UHS state to ML/LOGS/M6II_SD.LOG.",
-                .help2 = "Read-only probe used to map the M6II UHS-I driver and clock path.",
-            },
-            {
-                .name = "Canon RecordStart",
-                .select = m6ii_sd_sdr_mode_0,
-                .icon_type = IT_ACTION,
-                .help = "Call DebugSTG_SetSDRMode(0); ROM routes this to RecordStart(B).",
-                .help2 = "May reconfigure card access. Reboot if the card becomes unavailable.",
-            },
-            {
-                .name = "Canon RecordEnd",
-                .select = m6ii_sd_sdr_mode_1,
-                .icon_type = IT_ACTION,
-                .help = "Call DebugSTG_SetSDRMode(1); ROM routes this to RecordEnd(B).",
-                .help2 = "May reconfigure card access. Reboot if the card becomes unavailable.",
+                .help2 = "Also dumps Canon's DryOS SD-card information trace.",
             },
             MENU_EOL,
         },
