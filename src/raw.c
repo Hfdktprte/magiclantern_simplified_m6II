@@ -66,6 +66,45 @@ static void m6ii_lowbit_set_error(const char *fmt, ...)
     vsnprintf(m6ii_lowbit_error, sizeof(m6ii_lowbit_error), fmt, ap);
     va_end(ap);
 }
+
+static void m6ii_lowbit_write_log(uint32_t channels,
+                                  uint32_t puid_base,
+                                  uint32_t puid_addr,
+                                  uint32_t puid,
+                                  uint32_t pui_base,
+                                  uint32_t pui_addr,
+                                  uint32_t packmode)
+{
+    FILE *f = FIO_CreateFile("M6II_LOWBIT.LOG");
+    if (!f) return;
+
+    char line[512];
+    int len = snprintf(line, sizeof(line),
+        "M6II low-bit table diagnostic\n"
+        "DmacInfo=%08x\n"
+        "channels=%x\n"
+        "RAW_channel=%x\n"
+        "RAW_mmio=%08x\n"
+        "puid_base=%08x\n"
+        "puid_addr=%08x\n"
+        "puid=%08x\n"
+        "pui_base=%08x\n"
+        "pui_addr=%08x\n"
+        "packmode_ptr=%08x\n",
+        0xE1008944u,
+        channels,
+        3u,
+        MEM(0xE1008944u + 3u * 8u),
+        puid_base,
+        puid_addr,
+        puid,
+        pui_base,
+        pui_addr,
+        packmode);
+
+    FIO_WriteFile(f, line, len);
+    FIO_CloseFile(f);
+}
 #else
 const char * raw_lv_bpp_error_string(void)
 {
@@ -2268,7 +2307,7 @@ static uint32_t m6ii_detect_dmac_channel_count(void)
 
     if (n == M6II_D8_CHANNEL_COUNT_MAX)
     {
-        m6ii_lowbit_set_error("DmacInfo did not end before %u", M6II_D8_CHANNEL_COUNT_MAX);
+        m6ii_lowbit_set_error("DmacInfo no end before %x", M6II_D8_CHANNEL_COUNT_MAX);
         return 0;
     }
 
@@ -2306,25 +2345,29 @@ static uint32_t m6ii_raw_packmode_addr(void)
     uint32_t puid = MEM(puid_addr);
     if (puid >= channels)
     {
-        m6ii_lowbit_set_error("N=%u PUID=%08x @ %08x", channels, puid, puid_addr);
+        m6ii_lowbit_set_error("N=%x ID=%x IA=%08x", channels, puid, puid_addr);
         return 0;
     }
 
     uint32_t pui_addr = pui_base + puid * 12u;
     uint32_t packmode = MEM(pui_addr);
 
+    /* Persist the exact structural values before rejecting anything. */
+    m6ii_lowbit_write_log(channels, puid_base, puid_addr, puid,
+                          pui_base, pui_addr, packmode);
+
     if (packmode & 3u)
     {
-        m6ii_lowbit_set_error("N=%u ptr unaligned %08x PUID=%u PUI=%08x",
-                              channels, packmode, puid, pui_addr);
+        m6ii_lowbit_set_error("N=%x ID=%x PA=%08x P=%08x",
+                              channels, puid, pui_addr, packmode);
         return 0;
     }
 
     /* Canon PackMode fields are ordinary low RAM, not EDMAC MMIO. */
     if (packmode < 0x1000u || packmode >= 0x01000000u)
     {
-        m6ii_lowbit_set_error("N=%u Pack ptr %08x PUID=%u PUI=%08x",
-                              channels, packmode, puid, pui_addr);
+        m6ii_lowbit_set_error("N=%x ID=%x PA=%08x P=%08x",
+                              channels, puid, pui_addr, packmode);
         return 0;
     }
 
@@ -2336,7 +2379,7 @@ static uint32_t m6ii_raw_packmode_addr(void)
     uint32_t live_mode = MEM(packmode);
     if (raw_info.bits_per_pixel == 14 && live_mode != 2u)
     {
-        m6ii_lowbit_set_error("N=%u PackMode=%08x @ %08x", channels, live_mode, packmode);
+        m6ii_lowbit_set_error("N=%x MODE=%x PTR=%08x", channels, live_mode, packmode);
         return 0;
     }
 
