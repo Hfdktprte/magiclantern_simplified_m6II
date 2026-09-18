@@ -32,25 +32,10 @@
 //   0x300 padding
 //   0x400 per L2 table (0x400 aligned) // need one per 1MB region containing remaps
 // sizeof(struct mmu_L2_page_info)
-/*
- * M6II needs a second runtime ROM-remap page for Bilal's sd_uhs setup hook.
- * The generic fallback normally reserves only one 64-KB backing page; on this
- * port that page is already consumed before sd_clock patches the E00Bxxxx
- * SD setup path.
- */
-#if defined(CONFIG_M6II)
-#define GENERIC_MMU_REMAP_PAGES 2
-#else
-#define GENERIC_MMU_REMAP_PAGES 1
-#endif
-
-static uint8_t generic_mmu_space[
-      MMU_PAGE_SIZE * GENERIC_MMU_REMAP_PAGES
-    + MMU_L1_TABLE_SIZE
-    + 0x300
-    + MMU_L2_TABLE_SIZE * GENERIC_MMU_REMAP_PAGES
-    + sizeof(struct mmu_L2_page_info) * GENERIC_MMU_REMAP_PAGES]
-    __attribute__((aligned(0x10000)));
+static uint8_t generic_mmu_space[MMU_PAGE_SIZE + MMU_L1_TABLE_SIZE
+                                 + 0x300 + MMU_L2_TABLE_SIZE
+                                 + sizeof(struct mmu_L2_page_info)]
+               __attribute__((aligned(0x10000)));
 #endif
 
 #include "platform/mmu_patches.h"
