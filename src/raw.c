@@ -3118,7 +3118,7 @@ void raw_lv_request_bpp(int bpp)
 //            MODE_12BIT = 0x2000, // possibly 24 bit?
         };
     #elif defined(CONFIG_DIGIC_VIII)
-        #if defined(CONFIG_M6II)
+        #if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
         enum {
             MODE_16BIT = 0x2, /* unknown; keep 14-bit behavior */
             MODE_14BIT = 0x2,
