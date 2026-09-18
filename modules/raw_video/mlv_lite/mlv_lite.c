@@ -3863,10 +3863,19 @@ abort_and_check_early_stop:
     if (!RECORDING_H264 && card_index == 0)
     {
         /* faster writing speed that way */
+#ifndef CONFIG_M6II
         PauseLiveView();
 
         /* PauseLiveView breaks UI locks - why? */
         gui_uilock(UILOCK_EVERYTHING);
+#else
+        /*
+         * M6II is an always-LiveView mirrorless port and does not yet have a
+         * platform-proven PauseLiveView/ResumeLiveView pair. Keep Canon LV
+         * running while final RAW buffers and the MLV header are flushed.
+         */
+        DryosDebugMsg(0, 15, "M6II RAW stop: skipping PauseLiveView");
+#endif
     }
 
     /* write all queued blocks, if any */
@@ -3952,6 +3961,11 @@ abort_and_check_early_stop:
             slots[slot_index].status = SLOT_WRITING;
 
             if (indicator_display == INDICATOR_RAW_BUFFER) show_buffer_status();
+#ifdef CONFIG_M6II
+            NotifyBox(1200, "M6II stop: writing tail frame");
+            DryosDebugMsg(0, 15, "M6II RAW stop: tail write begin slot=%d size=%d",
+                          slot_index, slots[slot_index].size);
+#endif
             if (!write_frames(&f, slots[slot_index].ptr, slots[slot_index].size,
                               slots[slot_index].is_meta ? 0 : 1, card_index))
             {
@@ -3959,6 +3973,10 @@ abort_and_check_early_stop:
                 beep();
                 break;
             }
+#ifdef CONFIG_M6II
+            NotifyBox(1200, "M6II stop: tail frame written");
+            DryosDebugMsg(0, 15, "M6II RAW stop: tail write done");
+#endif
             free_slot(slot_index);
         }
     }
@@ -3973,8 +3991,16 @@ abort_and_check_early_stop:
     }
 
 cleanup:
+#ifdef CONFIG_M6II
+    NotifyBox(1200, "M6II stop: closing MLV");
+    DryosDebugMsg(0, 15, "M6II RAW stop: finish_chunk begin");
+#endif
     if (f)
         finish_chunk(f, card_index);
+#ifdef CONFIG_M6II
+    NotifyBox(1200, "M6II stop: MLV closed");
+    DryosDebugMsg(0, 15, "M6II RAW stop: finish_chunk done");
+#endif
     if (!written_total[card_index]
         && raw_movie_filename != NULL)
     {
@@ -3984,10 +4010,18 @@ cleanup:
 
     if (card_index == 0) // avoid cleaning up twice on dual slot cams
     {
+#ifdef CONFIG_M6II
+        NotifyBox(1200, "M6II stop: freeing buffers");
+        DryosDebugMsg(0, 15, "M6II RAW stop: free_buffers begin");
+#endif
         take_semaphore(settings_sem, 0);
         free_buffers();
         restore_bit_depth();
         give_semaphore(settings_sem);
+#ifdef CONFIG_M6II
+        NotifyBox(1200, "M6II stop: buffers free");
+        DryosDebugMsg(0, 15, "M6II RAW stop: free_buffers done");
+#endif
 
         /* everything saved, we can unlock the buttons */
         gui_uilock(UILOCK_NONE);
@@ -4010,10 +4044,16 @@ cleanup:
             printf("H.264 stopped.\n");
         }
 
+#ifndef CONFIG_M6II
         ResumeLiveView();
+#endif
         redraw();
         raw_recording_state = RAW_IDLE;
         mlv_rec_call_cbr(MLV_REC_EVENT_STOPPED, NULL);
+#ifdef CONFIG_M6II
+        NotifyBox(3000, "M6II RAW stop complete");
+        DryosDebugMsg(0, 15, "M6II RAW stop: IDLE");
+#endif
     }
 }
 
