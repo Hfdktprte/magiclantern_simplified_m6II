@@ -28,6 +28,7 @@
 
 // enable global draw
 #define FEATURE_GLOBAL_DRAW
+#define FEATURE_ZEBRA
 #define FEATURE_CROPMARKS
 
 // Bilal M50 RAW-video architecture: enable generic RAW LV core.
