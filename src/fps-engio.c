@@ -321,6 +321,22 @@ static void fps_read_current_timer_values();
     //
     // Variable, like 200D?  Different base clock though.
 
+#elif defined(CONFIG_M6II)
+    /*
+     * Measured from the real M6II DIGIC 8 timing registers.
+     *
+     * 4K24/30 and FHD24/30 all resolve to a 76.8 MHz timing-generator base.
+     * In FHD60, A/B remain at the FHD30 values while the effective clock
+     * doubles to 153.6 MHz.
+     *
+     * Keep the high-clock rule limited to the measured FHD60 path.  FHD50
+     * has not been measured on M6II yet and must not be inferred here.
+     */
+    #define TG_FREQ_BASE ( \
+        (video_mode_resolution == 0 && video_mode_fps == 60) \
+        ? 153600000 : 76800000)
+    #define FPS_TIMER_A_MIN (fps_timer_a_orig)
+
 #elif defined(CONFIG_DIGIC_VIII) || defined(CONFIG_DIGIC_X)
     #define TG_FREQ_BASE 32000000 //copy from 700D
     #define FPS_TIMER_A_MIN (fps_timer_a_orig)
@@ -913,6 +929,17 @@ int fps_get_current_x1000()
 {
     if (!lv)
         return 0;
+
+#if defined(CONFIG_M6II)
+    /*
+     * FHD29.97 and FHD59.94 expose the same A/B timer values on M6II.
+     * These registers cannot identify Canon's selected movie cadence.
+     * With FPS Override off, use Canon's precise movie-mode property.
+     */
+    if (!get_fps_override() && is_movie_mode() && video_mode_fps_x100 > 0)
+        return video_mode_fps_x100 * 10;
+#endif
+
     int fps_timer = (get_fps_register_b() & 0xFFFF) + 1;
     int fps_x1000 = TIMER_TO_FPS_x1000(fps_timer);
     return fps_x1000;

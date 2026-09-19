@@ -25,6 +25,10 @@
 
 /* hooking EFV_STATE ends with EvfCap crashes, requires investigation */
 #define CONFIG_STATE_OBJECT_HOOKS
+#define CONFIG_EVF_STATE_SYNC
+#define CONFIG_NO_DEDICATED_MOVIE_MODE
+#define CONFIG_EDMAC_MEMCPY_D8
+#define CONFIG_EDMAC_RAW_PATCH
 
 /** Large total memory, leading to unusual memory mapping,
  * CACHEABLE / UNCACHEABLE changes

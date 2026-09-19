@@ -945,10 +945,23 @@ void setup_bit_depth_digital_gain(int force_off)
 
 /* called when starting to record */
 static REQUIRES(settings_sem)
-void setup_bit_depth()
+int setup_bit_depth()
 {
-    raw_lv_request_bpp(BPP);
+    int requested_bpp = BPP;
+
+    raw_lv_request_bpp(requested_bpp);
+
+    /* Keep MLV geometry in sync with the active RAW writer. */
+    if (raw_info.bits_per_pixel != requested_bpp)
+    {
+        raw_lv_request_bpp(14);
+        output_format = OUTPUT_14BIT_NATIVE;
+        setup_bit_depth_digital_gain(1);
+        return 0;
+    }
+
     setup_bit_depth_digital_gain(0);
+    return 1;
 }
 
 /* called when recording ends, or when raw video is turned off */
@@ -2063,6 +2076,12 @@ unsigned int raw_rec_polling_cbr(unsigned int unused)
             gui_uilock(UILOCK_NONE);
         }
         return 0;
+    }
+
+    /* reallocate if no buffer is allocated while idle. This happens on M50 after stopping recording ("No memory suites" keeps screaming) */
+    if (!shoot_mem_suite && !srm_mem_suite && (RAW_IS_IDLE || RAW_IS_PREPARING))
+    {
+        realloc = 1;
     }
 
     /* reallocate buffers if needed (only if not recording) */
@@ -3427,8 +3446,14 @@ void raw_video_rec_task(uint32_t card_index)
         take_semaphore(settings_sem, 0);
         update_resolution_params();
         setup_buffers();
-        setup_bit_depth();
+        int bit_depth_ok = setup_bit_depth();
         give_semaphore(settings_sem);
+
+        if (!bit_depth_ok)
+        {
+            NotifyBox(5000, "RAW bit depth unavailable");
+            goto cleanup;
+        }
 
         /* create output file */
         raw_movie_filename = get_next_raw_movie_file_name();
@@ -3956,8 +3981,12 @@ cleanup:
         }
 
         ResumeLiveView();
-        redraw();
         raw_recording_state = RAW_IDLE;
+
+        /* Clear the MLV status overlay before returning to idle. */
+        BMP_LOCK(clrscr();)
+        redraw();
+
         mlv_rec_call_cbr(MLV_REC_EVENT_STOPPED, NULL);
     }
 }
@@ -4201,7 +4230,7 @@ unsigned int raw_rec_keypress_cbr(unsigned int key)
     
     /* ... or SET on 5D2/50D */
     if (cam_50d || cam_5d2) rec_key_pressed = (key == MODULE_KEY_PRESS_SET);
-    
+
     if (rec_key_pressed)
     {
         printf("REC key pressed.\n");
@@ -4552,8 +4581,9 @@ static unsigned int raw_rec_init()
     { // so far, only Digic 5 has working lossless compression, hide on other cams
         if (raw_video_menu->children[2].max > 2)
         {
-            raw_video_menu->children[2].max = 2; // hide lossless options, which are 3, 4, 5
-            output_format = 0; // plain 14-bit, no lossless support on D4, D678 (yet)
+            raw_video_menu->children[2].max = 2; // hide lossless options, keep 14/12/10-bit uncompressed
+            if (output_format > 2)
+                output_format = 0;
         }
     }
 

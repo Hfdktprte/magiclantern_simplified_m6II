@@ -159,6 +159,7 @@ EC811[1]>VramState
 #define YUV422_LV_BUFFER_DISPLAY_ADDR DV_VRAM_PANEL
 #define YUV422_LV_PITCH               736 // Is it 736 or 720? No scalling on XCM but UI is 720, OutputChunk 736
 #define YUV422_HD_BUFFER_DMA_ADDR     0x0 // TODO: Fix it, null pointer!. It expects this to be shamem_read(some_DMA_ADDR)
+#define RAW_LV_EDMAC_CHANNEL_ADDR      0xD0420200
 
 // At time of writing R uses here "DispOperator_PropertyMasterSetDisplayTurnOffOn (%d)"
 // but I already found that our code expects this to be display statobject state

@@ -18,6 +18,8 @@
 
 #define BGMT_PLAY                    0x12 // I think?
 #define BGMT_TRASH                   0x21 // map to M-fn for now
+#define BGMT_REC                     0x2C
+#define BGMT_UNPRESS_REC             0x2D
 
 #define BGMT_PRESS_RIGHT             0x3B
 #define BGMT_UNPRESS_RIGHT           0x3C

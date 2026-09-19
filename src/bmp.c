@@ -240,17 +240,12 @@ void refresh_yuv_from_rgb(void)
             rgb_row = rgb_row + BMP_LAYER_WIDTH;
         }
 #else
-        //SJE FIXME benchmark this loop, it probably wants optimising
+        /* Same full-buffer RGBA conversion used by the existing
+         * zebra_should_run() path: preserve alpha in the destination layer.
+         */
         for (size_t n = 0; n < BMP_VRAM_SIZE; n++)
         {
-            // limited alpha support, if dest pixel would be full alpha,
-            // don't copy into dest.  This is COLOR_TRANSPARENT_BLACK in
-            // the LUT
-            uint32_t rgb = indexed2rgb(*b);
-            if ((rgb && 0xff000000) == 0x00000000)
-                rgb_data++;
-            else
-                *rgb_data++ = rgb;
+            *rgb_data++ = indexed2rgb(*b);
             b++;
         }
 #endif
