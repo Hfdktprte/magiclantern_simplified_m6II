@@ -23,6 +23,9 @@
 #include "lvinfo.h"
 #include "raw.h"
 #include "rom_values.h"
+#ifdef CONFIG_M6II_CRX_PROBE
+#include "crx_probe.h"
+#endif
 
 #ifdef CONFIG_DEBUG_INTERCEPT
 #include "dm-spy.h"
@@ -388,6 +391,105 @@ static void m6ii_crx_trace_raw_still_task(void* priv, int unused)
     call("dumpf");
 
     NotifyBox(5000, "CRX trace saved to logNNNN.log");
+}
+
+
+static const char *m6ii_crx_kind_name(uint32_t kind)
+{
+    switch (kind)
+    {
+        case M6II_CRX_CAP_INIT: return "Init";
+        case M6II_CRX_CAP_SET_PARAM: return "SetParam";
+        case M6II_CRX_CAP_START: return "Start";
+        default: return "Unknown";
+    }
+}
+
+static void m6ii_crx_dump_words(FILE *f, const char *name,
+                                const uint8_t *buf, uint32_t size)
+{
+    my_fprintf(f, "%s (%u bytes)\n", name, size);
+    for (uint32_t off = 0; off < size; off += 16)
+    {
+        my_fprintf(f, "%04x:", off);
+        for (uint32_t j = 0; j < 16 && off + j < size; j += 4)
+        {
+            uint32_t v = 0;
+            memcpy(&v, buf + off + j, sizeof(v));
+            my_fprintf(f, " %08x", v);
+        }
+        my_fprintf(f, "\n");
+    }
+}
+
+static void m6ii_crx_capture_encoder_args_task(void* priv, int unused)
+{
+    if (is_movie_mode())
+    {
+        NotifyBox(5000, "CRX args: switch to photo mode.");
+        return;
+    }
+
+    m6ii_crx_cap_reset();
+
+    int err = m6ii_crx_cap_install();
+    if (err != E_PATCH_OK)
+    {
+        NotifyBox(7000, "CRX args: hook install failed %x", err);
+        return;
+    }
+
+    NotifyBox(4000, "CRX args: taking one Canon RAW still...");
+    msleep(300);
+
+    int rc = take_a_pic(0);
+
+    /* CRX completion/file tasks can trail shutter completion. */
+    msleep(1800);
+
+    int unpatch_err = m6ii_crx_cap_remove();
+
+    const struct m6ii_crx_cap_file *cap = m6ii_crx_cap_data();
+
+    FILE *bin = FIO_CreateFile("ML/LOGS/M6II_CRXARGS.BIN");
+    if (bin)
+    {
+        FIO_WriteFile(bin, cap, sizeof(*cap));
+        FIO_CloseFile(bin);
+    }
+
+    FILE *log = FIO_CreateFile("ML/LOGS/M6II_CRXARGS.LOG");
+    if (log)
+    {
+        my_fprintf(log,
+            "M6II 1.1.1 native CRAW host API capture\n"
+            "take_a_pic rc=%d unpatch=%x\n"
+            "magic=%08x version=%u records=%u record_size=%u\n\n",
+            rc, unpatch_err, cap->magic, cap->version,
+            cap->record_count, cap->record_size);
+
+        uint32_t n = cap->record_count;
+        if (n > M6II_CRX_CAP_MAX) n = M6II_CRX_CAP_MAX;
+
+        for (uint32_t i = 0; i < n; i++)
+        {
+            const struct m6ii_crx_cap_record *r = &cap->records[i];
+            my_fprintf(log,
+                "[%u] %s kind=%u seq=%u arg0=%08x arg1=%08x arg2=%08x\n",
+                i, m6ii_crx_kind_name(r->kind), r->kind, r->seq,
+                r->arg0, r->arg1, r->arg2);
+            m6ii_crx_dump_words(log, "blob1", r->blob1, sizeof(r->blob1));
+            if (r->kind == M6II_CRX_CAP_START)
+                m6ii_crx_dump_words(log, "blob2", r->blob2, sizeof(r->blob2));
+            my_fprintf(log, "\n");
+        }
+        FIO_CloseFile(log);
+    }
+
+    if (unpatch_err != E_PATCH_OK)
+        NotifyBox(8000, "CRX args saved, but unpatch=%x. Reboot.", unpatch_err);
+    else
+        NotifyBox(7000, "CRX args: %u records saved.", cap->record_count);
 }
 #endif
 
@@ -1031,6 +1133,13 @@ static struct menu_entry debug_menus[] = {
         .select      = run_in_separate_task,
         .help        = "RAW-only photo: capture one still with full Canon debug logging.",
         .help2       = "Writes logNNNN.log with M6II_CRX_TRACE_BEGIN/END markers. Dump ROM and RAM once as well."
+    },
+    {
+        .name        = "Capture CRX args",
+        .priv        = m6ii_crx_capture_encoder_args_task,
+        .select      = run_in_separate_task,
+        .help        = "Takes one Canon RAW still and traces native CRAW encoder descriptors.",
+        .help2       = "Writes ML/LOGS/M6II_CRXARGS.BIN and .LOG; observation-only."
     },
 #endif
     {
