@@ -1480,11 +1480,13 @@ int raw_update_params()
         ans = raw_update_params_once();
     }
 
+    #ifndef CONFIG_M6II
     if (raw_info.bits_per_pixel != 14)
     {
         /* hack: this will disable all overlays at bit depths other than 14 */
         return 0;
     }
+    #endif
 
     return ans;
 }

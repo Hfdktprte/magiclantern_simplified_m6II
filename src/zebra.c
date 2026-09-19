@@ -438,7 +438,9 @@ int get_global_draw() // menu setting, or off if
     if (lv && ZEBRAS_IN_LIVEVIEW)
     {
         return 
+            #ifndef CONFIG_M6II
             lv_disp_mode == 0 &&
+            #endif
             !idle_globaldraw_disable && 
             bmp_is_on() &&
             DISPLAY_IS_ON && 
@@ -1325,11 +1327,11 @@ static int zebra_digic_dirty = 0;
 static void draw_zebras( int Z )
 {
     uint8_t * const bvram = bmp_vram_real();
-    int zd = Z && zebra_draw && (lv_luma_is_accurate() || PLAY_OR_QR_MODE) && (zebra_rec || NOT_RECORDING); // when to draw zebras
 
     #ifdef CONFIG_M6II
-    if (RECORDING)
-        zd = 0;
+    int zd = Z && zebra_draw && (lv || PLAY_OR_QR_MODE) && NOT_RECORDING;
+    #else
+    int zd = Z && zebra_draw && (lv_luma_is_accurate() || PLAY_OR_QR_MODE) && (zebra_rec || NOT_RECORDING); // when to draw zebras
     #endif
 
     if (zd)
@@ -4240,7 +4242,11 @@ livev_hipriority_task( void* unused )
             msleep(100);
         }
 
+        #ifdef CONFIG_M6II
+        int zd = zebra_draw && (lv || PLAY_OR_QR_MODE) && NOT_RECORDING;
+        #else
         int zd = zebra_draw && (lv_luma_is_accurate() || PLAY_OR_QR_MODE) && (zebra_rec || NOT_RECORDING); // when to draw zebras (should match the one from draw_zebra_and_focus)
+        #endif
         if (!zd) digic_zebra_cleanup();
         
 #ifdef CONFIG_RAW_LIVEVIEW
