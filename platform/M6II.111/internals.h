@@ -33,7 +33,7 @@
 
 /* Bilal-style low-bit RAW support: patch Canon RAW writer pitch setup.
  * M6II has a single ROM-remap page; this RAW branch owns it. */
-#define CONFIG_EDMAC_RAW_PATCH
+/* CONFIG_EDMAC_RAW_PATCH disabled on CRX probe: the single 64 KiB MMU remap page is used to trace Canon's CRAW host API. */
 
 /* Diagnostic-only branch: trace one native Canon RAW still to locate the DIGIC 8 CRX pipeline. */
 #define CONFIG_M6II_CRX_PROBE
