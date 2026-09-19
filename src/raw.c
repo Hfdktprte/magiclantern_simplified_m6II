@@ -3075,8 +3075,14 @@ int can_use_raw_overlays()
 #ifdef CONFIG_RAW_LIVEVIEW
     if (lv && raw_lv_is_enabled())
     {
+        #ifdef CONFIG_M6II
+        return raw_info.bits_per_pixel == 10 ||
+               raw_info.bits_per_pixel == 12 ||
+               raw_info.bits_per_pixel == 14;
+        #else
         /* currently, raw overlays only work with 14 bits per pixel */
         return raw_info.bits_per_pixel == 14;
+        #endif
     }
 #endif
 
@@ -3089,8 +3095,13 @@ int can_use_raw_overlays_menu()
     if (is_movie_mode())
     {
         /* in movie mode, raw overlays don't make much sense for H.264 video, so only show them for raw video */
+        #ifdef CONFIG_M6II
+        if (lv)
+            return 1;
+        #else
         if (lv && raw_lv_is_enabled())
             return 1;
+        #endif
     }
     else
 #endif

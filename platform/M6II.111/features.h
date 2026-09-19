@@ -28,9 +28,11 @@
 
 // enable global draw
 #define FEATURE_GLOBAL_DRAW
+#define FEATURE_ZEBRA
 #define FEATURE_CROPMARKS
 
 #define CONFIG_RAW_LIVEVIEW
+#define FEATURE_RAW_ZEBRAS
 
 // Enable remapping ROM pages to RAM
 #define CONFIG_SGI_HANDLERS

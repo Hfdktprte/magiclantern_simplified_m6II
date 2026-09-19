@@ -88,6 +88,7 @@ static void schedule_transparent_overlay();
 //~ static void defish_draw_lv_color();
 static int zebra_color_word_row(int c, int y);
 static void spotmeter_step();
+static void clrscr_mirror( void );
 static int zebra_rgb_color(int underexposed, int clipR, int clipG, int clipB, int y);
 static int zebra_rgb_solid_color(int underexposed, int clipR, int clipG, int clipB);
 
@@ -616,8 +617,168 @@ hist_build()
 
 #ifdef FEATURE_RAW_ZEBRAS
 
+#ifdef CONFIG_M6II
+static CONFIG_INT("raw.zebra", raw_zebra_enable, 1); /* LiveView RAW zebras; recording is gated below */
+#else
 static CONFIG_INT("raw.zebra", raw_zebra_enable, 2); /* 1 = always, 2 = photo only */
+#endif
 #define RAW_ZEBRA_ENABLE (raw_zebra_enable == 1 || (raw_zebra_enable == 2 && !lv))
+
+#ifdef CONFIG_M6II
+static inline uint16_t m6ii_raw_zebra_get_pixel(int x, int y)
+{
+    int bpp = raw_info.bits_per_pixel;
+    if (bpp != 10 && bpp != 12 && bpp != 14)
+        return 0;
+
+    if (!raw_info.buffer || x < 0 || y < 0 ||
+        x >= raw_info.width || y >= raw_info.height)
+        return 0;
+
+    const uint8_t *row = (const uint8_t *) raw_info.buffer + y * raw_info.pitch;
+    int src_pos = x * bpp / 16;
+    int bits_left = (bpp * x - 16 * src_pos) % 16;
+    int shift_right = 16 - bpp - bits_left;
+    int byte_pos = src_pos * 2;
+
+    uint32_t value = row[byte_pos] | ((uint32_t) row[byte_pos + 1] << 8);
+
+    if (shift_right >= 0)
+    {
+        value >>= shift_right;
+    }
+    else
+    {
+        uint32_t value2 = row[byte_pos + 2] | ((uint32_t) row[byte_pos + 3] << 8);
+        value <<= -shift_right;
+        value |= value2 >> (16 + shift_right);
+    }
+
+    return value & ((1u << bpp) - 1);
+}
+
+static inline int m6ii_raw_zebra_block_max(int x, int y)
+{
+    x &= ~1;
+    y &= ~1;
+
+    if (x + 1 >= raw_info.width || y + 1 >= raw_info.height)
+        return 0;
+
+    int p0 = m6ii_raw_zebra_get_pixel(x,     y);
+    int p1 = m6ii_raw_zebra_get_pixel(x + 1, y);
+    int p2 = m6ii_raw_zebra_get_pixel(x,     y + 1);
+    int p3 = m6ii_raw_zebra_get_pixel(x + 1, y + 1);
+
+    return MAX(MAX(p0, p1), MAX(p2, p3));
+}
+
+static inline int m6ii_raw_zebra_block_min(int x, int y)
+{
+    x &= ~1;
+    y &= ~1;
+
+    if (x + 1 >= raw_info.width || y + 1 >= raw_info.height)
+        return 0;
+
+    int p0 = m6ii_raw_zebra_get_pixel(x,     y);
+    int p1 = m6ii_raw_zebra_get_pixel(x + 1, y);
+    int p2 = m6ii_raw_zebra_get_pixel(x,     y + 1);
+    int p3 = m6ii_raw_zebra_get_pixel(x + 1, y + 1);
+
+    return MIN(MIN(p0, p1), MIN(p2, p3));
+}
+
+static inline void m6ii_raw_zebra_write4(
+    uint8_t *bvram,
+    uint8_t *mirror,
+    int x,
+    int y,
+    uint32_t color)
+{
+    uint32_t *bp = (uint32_t *)(bvram + BM(x, y));
+    uint32_t *mp = (uint32_t *)(mirror + BM(x, y));
+
+    if (*bp != 0 && *bp != *mp)
+        return;
+    if (*mp & 0x80808080)
+        return;
+
+    *bp = *mp = color;
+}
+
+static void FAST draw_zebras_raw_lv_m6ii()
+{
+    if (RECORDING || !raw_update_params())
+        return;
+
+    int bpp = raw_info.bits_per_pixel;
+    if (bpp != 10 && bpp != 12 && bpp != 14)
+        return;
+
+    uint8_t *bvram = bmp_vram();
+    uint8_t *mirror = get_bvram_mirror();
+    if (!bvram || !mirror || !raw_info.buffer)
+        return;
+
+    int level_shift = 14 - bpp;
+    int white = raw_info.white_level >> level_shift;
+    int black = raw_info.black_level >> level_shift;
+    int max_value = (1 << bpp) - 1;
+
+    white = COERCE(white, black + 1, max_value);
+
+    int under = 0;
+    if (zebra_raw_underexposure)
+    {
+        under = ev_to_raw(- (raw_info.dynamic_range - (zebra_raw_underexposure - 1) * 100) / 100.0);
+        under >>= level_shift;
+        under = COERCE(under, 0, white - 1);
+    }
+
+    int off = get_y_skip_offset_for_overlays();
+
+    for (int yb = os.y0 + off; yb < os.y_max - off - 1; yb += 2)
+    {
+        int yr = BM2RAW_Y(yb);
+
+        for (int xb = os.x0; xb < os.x_max - 7; xb += 8)
+        {
+            int xr = BM2RAW_X(xb);
+
+            uint32_t color0 = 0;
+            uint32_t color1 = 0;
+
+            if (xr >= raw_info.active_area.x1 &&
+                xr <  raw_info.active_area.x2 &&
+                yr >= raw_info.active_area.y1 &&
+                yr <  raw_info.active_area.y2)
+            {
+                int hi = m6ii_raw_zebra_block_max(xr, yr);
+                int lo = under ? m6ii_raw_zebra_block_min(xr, yr) : white;
+
+                if (hi >= white)
+                {
+                    color0 = zebra_color_word_row(COLOR_RED, yb);
+                    color1 = zebra_color_word_row(COLOR_RED, yb + 1);
+                }
+                else if (under && lo <= under)
+                {
+                    color0 = zebra_color_word_row(COLOR_BLUE, yb);
+                    color1 = zebra_color_word_row(COLOR_BLUE, yb + 1);
+                }
+            }
+
+            m6ii_raw_zebra_write4(bvram, mirror, xb,     yb,     color0);
+            m6ii_raw_zebra_write4(bvram, mirror, xb + 4, yb,     color0);
+            m6ii_raw_zebra_write4(bvram, mirror, xb,     yb + 1, color1);
+            m6ii_raw_zebra_write4(bvram, mirror, xb + 4, yb + 1, color1);
+        }
+    }
+
+    ml_refresh_display_needed = 1;
+}
+#endif
 
 static void FAST draw_zebras_raw()
 {
@@ -1165,13 +1326,24 @@ static void draw_zebras( int Z )
 {
     uint8_t * const bvram = bmp_vram_real();
     int zd = Z && zebra_draw && (lv_luma_is_accurate() || PLAY_OR_QR_MODE) && (zebra_rec || NOT_RECORDING); // when to draw zebras
+
+    #ifdef CONFIG_M6II
+    if (RECORDING)
+        zd = 0;
+    #endif
+
     if (zd)
     {
         #ifdef FEATURE_RAW_ZEBRAS
         if (RAW_ZEBRA_ENABLE && can_use_raw_overlays())
         {
+            #ifdef CONFIG_M6II
+            if (lv) draw_zebras_raw_lv_m6ii();
+            else draw_zebras_raw();
+            #else
             if (lv) draw_zebras_raw_lv();
             else draw_zebras_raw();
+            #endif
             return;
         }
         #endif
@@ -1965,7 +2137,11 @@ static MENU_UPDATE_FUNC(zebra_draw_display)
     if (z && can_use_raw_overlays_menu())
     {
         raw_zebra_update(entry, info);
+        #ifdef CONFIG_M6II
+        if (RAW_ZEBRA_ENABLE) MENU_SET_VALUE("RAW");
+        #else
         if (RAW_ZEBRA_ENABLE) MENU_SET_VALUE("RAW RGB");
+        #endif
     }
     #endif
 }
@@ -4107,9 +4283,29 @@ livev_hipriority_task( void* unused )
         bmp_printf(FONT_MED, 100, 100, "ext:%d%d%d \nlv:%x %dx%d \nhd:%x %dx%d ", EXT_MONITOR_RCA, ext_monitor_hdmi, hdmi_code, lv->vram, lv->width, lv->height, hd->vram, hd->width, hd->height);
         #endif
 
+        #ifdef CONFIG_M6II
+        static int m6ii_prev_recording = 0;
+        int m6ii_recording = RECORDING ? 1 : 0;
+        if (m6ii_recording && !m6ii_prev_recording)
+        {
+            BMP_LOCK( clrscr_mirror(); )
+            ml_refresh_display_needed = 1;
+        }
+        m6ii_prev_recording = m6ii_recording;
+        #endif
+
         #ifdef CONFIG_RAW_LIVEVIEW
         int raw_needed = 0;
 
+        #ifdef CONFIG_M6II
+        if (lv && lv_dispsize == 1 && NOT_RECORDING)
+        {
+            #if defined(FEATURE_RAW_ZEBRAS)
+            if (zebra_draw && raw_zebra_enable == 1)
+                raw_needed = 1;
+            #endif
+        }
+        #else
         /* if picture quality is raw, switch the LiveView to raw mode (photo, zoom 1x) */
         int raw = pic_quality & 0x60000;
         if (raw && lv_dispsize == 1 && !is_movie_mode())
@@ -4126,6 +4322,7 @@ livev_hipriority_task( void* unused )
             #endif
             if (spotmeter_draw && spotmeter_formula == 3) raw_needed = 1;   /* spotmeter, units: raw */
         }
+        #endif
 
         if (!raw_flag && raw_needed)
         {
