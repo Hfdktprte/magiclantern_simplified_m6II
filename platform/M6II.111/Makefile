@@ -21,8 +21,10 @@ CFLAGS_PLATFORM = -mthumb -mlong-calls \
 PLATFORM_ARCH = armv7-a
 
 ML_BOOT_OBJ = boot-d678.o
-# Match Bilal 32dbd9c integration: platform overrides + D8 EDMAC backend only.
+# Match Bilal 32dbd9c integration: platform overrides + D8 EDMAC backend.
 ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/function_overrides.o edmac-d8.o
+# M6II-only Debug menu tool for enumerating Canon RAW LiveView geometries.
+ML_SRC_EXTRA_OBJS += $(BUILD_DIR)/m6ii_raw_geometry.o
 
 include ../Makefile
 
