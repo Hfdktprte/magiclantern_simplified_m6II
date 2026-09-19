@@ -25,6 +25,7 @@
 #include "rom_values.h"
 #ifdef CONFIG_M6II_CRX_PROBE
 #include "crx_probe.h"
+#include "patch.h"
 #endif
 
 #ifdef CONFIG_DEBUG_INTERCEPT
