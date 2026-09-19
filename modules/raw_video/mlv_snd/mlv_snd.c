@@ -109,8 +109,11 @@ audio_data_t *mlv_snd_next_buffer = NULL;
 #define MLV_SND_STATE_SOUND_STOP_ASIF        4  /* waiting for ASIF to process its last buffer, set by mlv_snd_asif_in_cbr() */
 #define MLV_SND_STATE_SOUND_STOP_TASK        5  /* waiting for thread to stop, set by mlv_snd_asif_in_cbr() */
 #define MLV_SND_STATE_SOUND_STOPPED          6  /* all threads and stuff is stopped, finish cleanup, set by task */
+#define MLV_SND_STATE_START_PENDING          7  /* M6II SoundDev start handed off from VSYNC */
 
 static uint32_t mlv_snd_state = MLV_SND_STATE_IDLE;
+static struct semaphore *mlv_snd_m6ii_start_sem = NULL;
+static volatile uint32_t mlv_snd_m6ii_worker_waiting = 0;
 
 /* this tells the audio backend that we are going to record sound */
 static ml_cbr_action mlv_snd_snd_rec_cbr (const char *event, void *data)
@@ -241,9 +244,37 @@ static void mlv_snd_flush_entries(struct msg_queue *queue, uint32_t clear)
 static void mlv_snd_stop()
 {
     trace_write(trace_ctx, "mlv_snd_stop: stopping worker and audio");
-    
-    mlv_snd_state = MLV_SND_STATE_SOUND_STOPPING;
-    
+
+    int m6ii = is_camera("M6II", "1.1.1");
+    uint32_t state_before_stop = mlv_snd_state;
+
+    if (m6ii &&
+        (state_before_stop == MLV_SND_STATE_READY ||
+         state_before_stop == MLV_SND_STATE_START_PENDING))
+    {
+        /*
+         * No native audio stream exists yet, so no ASIF/SoundDev callback can
+         * advance the legacy stop state machine. Stop the writer directly.
+         */
+        mlv_snd_state = MLV_SND_STATE_SOUND_STOP_TASK;
+
+        /*
+         * READY means VSYNC never signaled this recording's one-shot M6II
+         * start worker. Wake it only in that case; START_PENDING was already
+         * signaled by the VSYNC callback.
+         */
+        if (state_before_stop == MLV_SND_STATE_READY &&
+            mlv_snd_m6ii_worker_waiting &&
+            mlv_snd_m6ii_start_sem)
+        {
+            give_semaphore(mlv_snd_m6ii_start_sem);
+        }
+    }
+    else
+    {
+        mlv_snd_state = MLV_SND_STATE_SOUND_STOPPING;
+    }
+
     /* wait until audio and task stopped */
     uint32_t loops = 100;
     while((mlv_snd_state != MLV_SND_STATE_SOUND_STOPPED) && (--loops > 0))
@@ -257,12 +288,19 @@ static void mlv_snd_stop()
         trace_write(trace_ctx, "mlv_snd_stop: failed to stop audio (state %d)", mlv_snd_state);
         beep();
     }
-    
-    /* some models may need this */
-    StopASIFDMAADC();
+
+    if (!m6ii ||
+        state_before_stop == MLV_SND_STATE_SOUND_RUNNING ||
+        state_before_stop == MLV_SND_STATE_SOUND_STOPPING ||
+        state_before_stop == MLV_SND_STATE_SOUND_STOP_ASIF)
+    {
+        StopASIFDMAADC();
+    }
+
     // SoundDevShutDownIn();  /* no model seems to need this */
-    audio_configure(1);
-    
+    if (!m6ii)
+        audio_configure(1);
+
     /* now flush the buffers */
     trace_write(trace_ctx, "mlv_snd_stop: flush mlv_snd_buffers_done");
     mlv_snd_flush_entries(mlv_snd_buffers_done, 0);
@@ -343,6 +381,15 @@ static void mlv_snd_prepare_audio()
 {
     mlv_snd_in_sample_rate = mlv_snd_rates[mlv_snd_rate_sel];
 
+    /* M6II uses Canon's SoundDev/AStream recorder. */
+    if (is_camera("M6II", "1.1.1"))
+    {
+        mlv_snd_in_sample_rate = 48000;
+        mlv_snd_in_bits_per_sample = 16;
+        mlv_snd_in_channels = 2;
+        return;
+    }
+
     /* some models may need this */
     SoundDevActiveIn(0);
     
@@ -364,6 +411,75 @@ static void mlv_snd_alloc_buffers()
     for(int slot = 0; slot < MLV_SND_SLOTS; slot++)
     {
         mlv_snd_queue_slot();
+    }
+}
+
+static int mlv_snd_m6ii_start_audio_now(void)
+{
+    uint32_t msgs = 0;
+    msg_queue_count(mlv_snd_buffers_empty, &msgs);
+
+    if(msgs < 2)
+    {
+        return 0;
+    }
+
+    mlv_snd_current_buffer = NULL;
+    mlv_snd_next_buffer = NULL;
+
+    msg_queue_receive(mlv_snd_buffers_empty, &mlv_snd_current_buffer, 10);
+    msg_queue_receive(mlv_snd_buffers_empty, &mlv_snd_next_buffer, 10);
+
+    if(!mlv_snd_current_buffer || !mlv_snd_next_buffer)
+    {
+        if (mlv_snd_current_buffer)
+            msg_queue_post(mlv_snd_buffers_empty, (uint32_t) mlv_snd_current_buffer);
+        if (mlv_snd_next_buffer)
+            msg_queue_post(mlv_snd_buffers_empty, (uint32_t) mlv_snd_next_buffer);
+
+        mlv_snd_current_buffer = NULL;
+        mlv_snd_next_buffer = NULL;
+        return 0;
+    }
+
+    /*
+     * m6ii_sounddev.c owns the complete Canon SoundDev/AStream setup.
+     * Do not stack the generic audio_configure path on top of it.
+     */
+    int rc = StartASIFDMAADC(
+        mlv_snd_current_buffer->data, mlv_snd_current_buffer->length,
+        mlv_snd_next_buffer->data, mlv_snd_next_buffer->length,
+        mlv_snd_asif_in_cbr, 0);
+
+    if (rc)
+    {
+        msg_queue_post(mlv_snd_buffers_empty, (uint32_t) mlv_snd_current_buffer);
+        msg_queue_post(mlv_snd_buffers_empty, (uint32_t) mlv_snd_next_buffer);
+        mlv_snd_current_buffer = NULL;
+        mlv_snd_next_buffer = NULL;
+        return 0;
+    }
+
+    mlv_snd_current_buffer->timestamp = get_us_clock();
+    mlv_snd_state = MLV_SND_STATE_SOUND_RUNNING;
+    return 1;
+}
+
+static void mlv_snd_m6ii_start_task(void *unused)
+{
+    (void)unused;
+
+    take_semaphore(mlv_snd_m6ii_start_sem, 0);
+    mlv_snd_m6ii_worker_waiting = 0;
+
+    /*
+     * Recording may have stopped while this task was waiting. Only enter
+     * Canon SoundDev if VSYNC left the exact pending state in place.
+     */
+    if (mlv_snd_state == MLV_SND_STATE_START_PENDING)
+    {
+        if (!mlv_snd_m6ii_start_audio_now())
+            mlv_snd_state = MLV_SND_STATE_READY;
     }
 }
 
@@ -448,6 +564,19 @@ static void mlv_snd_start()
     
     mlv_snd_prepare_audio();
     task_create("mlv_snd", 0x16, 0x1000, mlv_snd_writer, NULL);
+
+    if (is_camera("M6II", "1.1.1") && mlv_snd_m6ii_start_sem)
+    {
+        mlv_snd_m6ii_worker_waiting = 1;
+        uint32_t task_id = task_create(
+            "mlv_snd_m6ii_start", 0x16, 0x1000,
+            mlv_snd_m6ii_start_task, NULL);
+
+        if (!task_id)
+        {
+            mlv_snd_m6ii_worker_waiting = 0;
+        }
+    }
 }
 
 void mlv_fill_wavi(mlv_wavi_hdr_t *hdr, uint64_t start_timestamp)
@@ -523,6 +652,23 @@ static void mlv_snd_cbr_started(uint32_t event, void *ctx, mlv_hdr_t *hdr)
     
     /* "delaying audio" in the video timeline means to skip video frames */
     mlv_rec_skip_frames(mlv_snd_vsync_delay);
+
+    if (is_camera("M6II", "1.1.1"))
+    {
+        if (!mlv_snd_m6ii_start_sem || !mlv_snd_m6ii_worker_waiting)
+        {
+            return;
+        }
+
+        /*
+         * This callback runs from RAW VSYNC. Do not call Canon SoundDev,
+         * message queues, task creation or any blocking primitive here.
+         * give_semaphore is explicitly interrupt-safe.
+         */
+        mlv_snd_state = MLV_SND_STATE_START_PENDING;
+        give_semaphore(mlv_snd_m6ii_start_sem);
+        return;
+    }
     
     /* fetch buffers to start recording */
     uint32_t msgs = 0;
@@ -565,7 +711,13 @@ static void mlv_snd_cbr_started(uint32_t event, void *ctx, mlv_hdr_t *hdr)
 
 static void mlv_snd_cbr_stopping(uint32_t event, void *ctx, mlv_hdr_t *hdr)
 {
-    if(mlv_snd_state != MLV_SND_STATE_SOUND_RUNNING)
+    if (is_camera("M6II", "1.1.1"))
+    {
+        if (mlv_snd_state == MLV_SND_STATE_IDLE ||
+            mlv_snd_state == MLV_SND_STATE_SOUND_STOPPED)
+            return;
+    }
+    else if(mlv_snd_state != MLV_SND_STATE_SOUND_RUNNING)
     {
         return;
     }
@@ -705,15 +857,23 @@ static unsigned int mlv_snd_init()
     mlv_snd_buffers_empty = (struct msg_queue *) msg_queue_create("mlv_snd_buffers_empty", MLV_SND_BLOCKS_PER_SLOT * MLV_SND_SLOTS);
     mlv_snd_buffers_done = (struct msg_queue *) msg_queue_create("mlv_snd_buffers_done", MLV_SND_BLOCKS_PER_SLOT * MLV_SND_SLOTS);
 
-    /* will the same menu work in both submenus? probably not */
-    if (menu_get_value_from_script("Movie", "RAW video") != INT_MIN)
+    if (is_camera("M6II", "1.1.1"))
     {
-        menu_add("RAW video", mlv_snd_menu, COUNT(mlv_snd_menu));
+        mlv_snd_m6ii_start_sem =
+            create_named_semaphore("mlv_snd_m6ii_start", SEM_CREATE_LOCKED);
+
+        if (!mlv_snd_m6ii_start_sem)
+        {
+            /* Sound failure must never make RAW video unusable. */
+            mlv_snd_enabled = 0;
+        }
     }
-    else if (menu_get_value_from_script("Movie", "RAW video (MLV)") != INT_MIN)
-    {
-        menu_add("RAW video (MLV)", mlv_snd_menu, COUNT(mlv_snd_menu));
-    }
+
+    /* Register sound controls directly in the Movie tab.
+     * This avoids depending on the RAW video submenu having been created
+     * before mlv_snd is initialized.
+     */
+    menu_add("Movie", mlv_snd_menu, COUNT(mlv_snd_menu));
 
     trace_write(trace_ctx, "mlv_snd_init: done");
     

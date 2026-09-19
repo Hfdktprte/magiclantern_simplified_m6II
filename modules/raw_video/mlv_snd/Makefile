@@ -1,6 +1,6 @@
 # define the module name - make sure name is max 8 characters
 MODULE_NAME = mlv_snd
-MODULE_OBJS = $(BUILD_DIR)/mlv_snd.o
+MODULE_OBJS = $(BUILD_DIR)/mlv_snd.o $(BUILD_DIR)/m6ii_sounddev.o
 TOP_DIR = ../../..
 
 # include modules environment
