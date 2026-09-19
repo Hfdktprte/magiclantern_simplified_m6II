@@ -40,6 +40,7 @@
 #include "focus.h"
 #include "lvinfo.h"
 #include "powersave.h"
+#include "module.h"
 
 #include "imgconv.h"
 #include "falsecolor.h"
@@ -194,6 +195,10 @@ static CONFIG_INT( "zebra.thr.hi",    zebra_level_hi, 99 );
 static CONFIG_INT( "zebra.thr.lo",    zebra_level_lo, 0 );
 static CONFIG_INT( "zebra.rec", zebra_rec,  1 );
 static CONFIG_INT( "zebra.raw.under", zebra_raw_underexposure,  1 );
+
+#ifdef CONFIG_M6II
+static int(*mlv_lite_raw_recording_state)(void) = MODULE_FUNCTION(mlv_lite_raw_recording_state);
+#endif
 
 #define MZ_ZOOM_WHILE_RECORDING 1
 #define MZ_ZOOMREC_N_FOCUS_RING 2
@@ -711,7 +716,7 @@ static inline void m6ii_raw_zebra_write4(
 
 static void FAST draw_zebras_raw_lv_m6ii()
 {
-    if (RECORDING || !raw_update_params())
+    if (RECORDING || mlv_lite_raw_recording_state() != 0 || !raw_update_params())
         return;
 
     int bpp = raw_info.bits_per_pixel;
@@ -1329,7 +1334,8 @@ static void draw_zebras( int Z )
     uint8_t * const bvram = bmp_vram_real();
 
     #ifdef CONFIG_M6II
-    int zd = Z && zebra_draw && (lv || PLAY_OR_QR_MODE) && NOT_RECORDING;
+    int mlv_busy = mlv_lite_raw_recording_state() != 0;
+    int zd = Z && zebra_draw && (lv || PLAY_OR_QR_MODE) && NOT_RECORDING && !mlv_busy;
     #else
     int zd = Z && zebra_draw && (lv_luma_is_accurate() || PLAY_OR_QR_MODE) && (zebra_rec || NOT_RECORDING); // when to draw zebras
     #endif
@@ -4243,7 +4249,8 @@ livev_hipriority_task( void* unused )
         }
 
         #ifdef CONFIG_M6II
-        int zd = zebra_draw && (lv || PLAY_OR_QR_MODE) && NOT_RECORDING;
+        int zd = zebra_draw && (lv || PLAY_OR_QR_MODE) && NOT_RECORDING &&
+                 mlv_lite_raw_recording_state() == 0;
         #else
         int zd = zebra_draw && (lv_luma_is_accurate() || PLAY_OR_QR_MODE) && (zebra_rec || NOT_RECORDING); // when to draw zebras (should match the one from draw_zebra_and_focus)
         #endif
@@ -4290,21 +4297,24 @@ livev_hipriority_task( void* unused )
         #endif
 
         #ifdef CONFIG_M6II
-        static int m6ii_prev_recording = 0;
-        int m6ii_recording = RECORDING ? 1 : 0;
-        if (m6ii_recording && !m6ii_prev_recording)
+        static int m6ii_prev_mlv_busy = 0;
+        int m6ii_mlv_busy = mlv_lite_raw_recording_state() != 0;
+        if (m6ii_mlv_busy && !m6ii_prev_mlv_busy)
         {
             BMP_LOCK( clrscr_mirror(); )
             ml_refresh_display_needed = 1;
         }
-        m6ii_prev_recording = m6ii_recording;
+        m6ii_prev_mlv_busy = m6ii_mlv_busy;
         #endif
 
         #ifdef CONFIG_RAW_LIVEVIEW
         int raw_needed = 0;
 
         #ifdef CONFIG_M6II
-        if (lv && lv_dispsize == 1 && NOT_RECORDING)
+        int m6ii_mlv_raw_enabled = get_config_var("raw.video.enabled");
+        if (lv && lv_dispsize == 1 && NOT_RECORDING &&
+            mlv_lite_raw_recording_state() == 0 &&
+            !m6ii_mlv_raw_enabled)
         {
             #if defined(FEATURE_RAW_ZEBRAS)
             if (zebra_draw && raw_zebra_enable == 1)

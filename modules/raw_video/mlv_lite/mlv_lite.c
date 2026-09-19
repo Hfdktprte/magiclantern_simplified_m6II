@@ -307,6 +307,11 @@ static volatile int raw_recording_state = RAW_IDLE;
                           raw_recording_state == RAW_PRE_RECORDING)
 #define RAW_IS_FINISHING (raw_recording_state == RAW_FINISHING)
 
+int mlv_lite_raw_recording_state()
+{
+    return raw_recording_state;
+}
+
 #define VIDF_HDR_SIZE 64
 
 /* one video frame */
