@@ -35,6 +35,9 @@
  * M6II has a single ROM-remap page; this RAW branch owns it. */
 #define CONFIG_EDMAC_RAW_PATCH
 
+/* Diagnostic-only branch: trace one native Canon RAW still to locate the DIGIC 8 CRX pipeline. */
+#define CONFIG_M6II_CRX_PROBE
+
 /** Large total memory, leading to unusual memory mapping,
  * CACHEABLE / UNCACHEABLE changes
  */
