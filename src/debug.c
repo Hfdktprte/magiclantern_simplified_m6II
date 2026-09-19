@@ -345,6 +345,53 @@ void guimode_test()
 }
 #endif
 
+#ifdef CONFIG_M6II_CRX_PROBE
+/*
+ * Record Canon's own DryOS debug stream around one ordinary still capture.
+ *
+ * Purpose: locate the DIGIC 8 still-RAW/CRX path before touching unknown
+ * compressor registers or attempting to reuse the unrelated LiveView
+ * Mem1Path pack/unpack engine.
+ *
+ * Camera setup for a useful trace:
+ *   - photo mode (not movie mode)
+ *   - image quality RAW only (not C-RAW, not RAW+JPEG)
+ *
+ * Output: Canon's usual logNNNN.log via dumpf(), bracketed by
+ * M6II_CRX_TRACE_BEGIN / M6II_CRX_TRACE_END markers.
+ */
+static void m6ii_crx_trace_raw_still_task(void* priv, int unused)
+{
+    if (is_movie_mode())
+    {
+        NotifyBox(5000, "CRX probe: switch to photo mode.");
+        return;
+    }
+
+    NotifyBox(3000, "CRX probe: taking one Canon RAW still...");
+
+    /* Same capture settings used by DEBUG_LOG_THIS, but keep printing quiet. */
+    dm_set_print_level(255, 0);
+    dm_set_store_level(255, 0);
+    dm_set_print_level(21, 30);
+    dm_set_store_level(21, 30);
+
+    dmstart();
+    msleep(200);
+
+    DryosDebugMsg(DM_MAGIC, 25, "M6II_CRX_TRACE_BEGIN");
+    int rc = take_a_pic(0);
+    DryosDebugMsg(DM_MAGIC, 25, "M6II_CRX_TRACE_END rc=%d", rc);
+
+    /* Let asynchronous image/file tasks finish emitting their tail messages. */
+    msleep(1500);
+    dmstop();
+    call("dumpf");
+
+    NotifyBox(5000, "CRX trace saved to logNNNN.log");
+}
+#endif
+
 static void run_test()
 {
     DryosDebugMsg(0, 15, "run_test fired");
@@ -977,6 +1024,15 @@ static struct menu_entry debug_menus[] = {
         .select        = dlg_test,
         .help = "Dialog templates (up/dn) and color palettes (left/right)"
     },*/
+#endif
+#ifdef CONFIG_M6II_CRX_PROBE
+    {
+        .name        = "Trace Canon RAW still",
+        .priv        = m6ii_crx_trace_raw_still_task,
+        .select      = run_in_separate_task,
+        .help        = "RAW-only photo: capture one still with full Canon debug logging.",
+        .help2       = "Writes logNNNN.log with M6II_CRX_TRACE_BEGIN/END markers. Dump ROM and RAM once as well."
+    },
 #endif
     {
         .name        = "Dump ROM and RAM",
