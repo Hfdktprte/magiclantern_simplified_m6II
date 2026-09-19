@@ -370,13 +370,13 @@ static void m6ii_crx_trace_raw_still_task(void* priv, int unused)
 
     NotifyBox(3000, "CRX probe: taking one Canon RAW still...");
 
-    /* Same capture settings used by DEBUG_LOG_THIS, but keep printing quiet. */
-    dm_set_print_level(255, 0);
+    /*
+     * M6II currently has dm_set_store_level and dumpf stubbed, but not the
+     * legacy dmstart/dmstop/dm_set_print_level helpers.  The Canon debug
+     * ring is already active, so only widen its store threshold here.
+     */
     dm_set_store_level(255, 0);
-    dm_set_print_level(21, 30);
     dm_set_store_level(21, 30);
-
-    dmstart();
     msleep(200);
 
     DryosDebugMsg(DM_MAGIC, 25, "M6II_CRX_TRACE_BEGIN");
@@ -385,7 +385,6 @@ static void m6ii_crx_trace_raw_still_task(void* priv, int unused)
 
     /* Let asynchronous image/file tasks finish emitting their tail messages. */
     msleep(1500);
-    dmstop();
     call("dumpf");
 
     NotifyBox(5000, "CRX trace saved to logNNNN.log");
