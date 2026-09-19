@@ -1445,6 +1445,130 @@ static void check_dup_frame(frame_buf_t *buffer)
     }
 }
 
+static uint16_t m6ii_mlv_play_get_pixel(const uint8_t *src, int pitch, int x, int y, int bpp)
+{
+    const uint8_t *row = src + y * pitch;
+    int src_pos = x * bpp / 16;
+    int bits_left = (bpp * x - 16 * src_pos) % 16;
+    int shift_right = 16 - bpp - bits_left;
+    int byte_pos = src_pos * 2;
+
+    uint32_t value = row[byte_pos] | ((uint32_t) row[byte_pos + 1] << 8);
+
+    if (shift_right >= 0)
+    {
+        value >>= shift_right;
+    }
+    else
+    {
+        uint32_t value2 = row[byte_pos + 2] | ((uint32_t) row[byte_pos + 3] << 8);
+        value <<= -shift_right;
+        value |= value2 >> (16 + shift_right);
+    }
+
+    return value & ((1u << bpp) - 1);
+}
+
+static void m6ii_mlv_play_render_frame(frame_buf_t *buffer)
+{
+    uint8_t *bvram = bmp_vram();
+    if (!bvram || !buffer->frameBufferAligned || !buffer->xRes || !buffer->yRes)
+        return;
+
+    int bpp = buffer->bitDepth;
+    if (bpp != 10 && bpp != 12 && bpp != 14 && bpp != 16)
+        return;
+
+    int pitch = buffer->xRes * bpp / 8;
+
+    static uint8_t tone[16384];
+    static int tone_black = -1;
+    static int tone_white = -1;
+    static int tone_bpp = -1;
+
+    int black = buffer->blackLevel;
+    int white = buffer->whiteLevel;
+
+    if (bpp == 16)
+    {
+        black >>= 2;
+        white >>= 2;
+    }
+
+    black = COERCE(black, 0, 16383);
+    white = COERCE(white, black + 1, 16383);
+
+    if (tone_black != black || tone_white != white || tone_bpp != bpp)
+    {
+        int range = white - black;
+
+        for (int i = 0; i < 16384; i++)
+        {
+            int v = COERCE(i - black, 0, range);
+            int level = v * 255 / range;
+
+            /* brighten linear RAW values for a useful playback preview */
+            level = level * (510 - level) / 255;
+            level = level * (510 - level) / 255;
+
+            tone[i] = 37 + level * 42 / 255;
+        }
+
+        tone_black = black;
+        tone_white = white;
+        tone_bpp = bpp;
+    }
+
+    int out_w = 720;
+    int out_h = buffer->yRes * out_w / buffer->xRes;
+
+    if (out_h > 480)
+    {
+        out_h = 480;
+        out_w = buffer->xRes * out_h / buffer->yRes;
+    }
+
+    out_w &= ~1;
+    out_h &= ~1;
+
+    int x0 = (720 - out_w) / 2;
+    int y0 = (480 - out_h) / 2;
+
+    for (int y = 0; y < 480; y++)
+        memset(bvram + y * BMPPITCH, 37, 720);
+
+    const uint8_t *src = (const uint8_t *) buffer->frameBufferAligned;
+
+    for (int y = 0; y < out_h; y += 2)
+    {
+        int raw_y = y * buffer->yRes / out_h;
+        uint8_t *dst0 = bvram + (y0 + y) * BMPPITCH + x0;
+        uint8_t *dst1 = dst0 + BMPPITCH;
+
+        for (int x = 0; x < out_w; x += 2)
+        {
+            int raw_x = x * buffer->xRes / out_w;
+
+            /* sample a green Bayer pixel for a stable monochrome preview */
+            raw_x = (raw_x & ~1) | ((raw_y & 1) ? 0 : 1);
+            raw_x = MIN(raw_x, buffer->xRes - 1);
+
+            uint32_t value = m6ii_mlv_play_get_pixel(src, pitch, raw_x, raw_y, bpp);
+            if (bpp == 16)
+                value >>= 2;
+
+            uint8_t gray = tone[MIN(value, 16383u)];
+
+            dst0[x] = gray;
+            dst0[x + 1] = gray;
+            dst1[x] = gray;
+            dst1[x + 1] = gray;
+        }
+    }
+
+    ml_refresh_display_needed = 1;
+}
+
 static void mlv_play_render_frame(frame_buf_t *buffer)
 {
     raw_info.buffer = buffer->frameBufferAligned;
@@ -1455,6 +1579,12 @@ static void mlv_play_render_frame(frame_buf_t *buffer)
 
     /* fixme: read aspect ratio from metadata */
     raw_force_aspect_ratio(1, 1);
+
+    if (is_camera("M6II", "1.1.1"))
+    {
+        m6ii_mlv_play_render_frame(buffer);
+        return;
+    }
     
     if(raw_twk_available())
     {
