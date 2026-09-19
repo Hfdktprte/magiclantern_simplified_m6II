@@ -1511,7 +1511,7 @@ static void m6ii_mlv_play_render_frame(frame_buf_t *buffer)
             level = level * (510 - level) / 255;
             level = level * (510 - level) / 255;
 
-            tone[i] = 37 + level * 42 / 255;
+            tone[i] = 38 + level * 41 / 255;
         }
 
         tone_black = black;
