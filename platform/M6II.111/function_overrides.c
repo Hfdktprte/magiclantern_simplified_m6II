@@ -18,6 +18,9 @@
 #include <lens.h>
 #include <edmac.h>
 #include <patch.h>
+#ifdef CONFIG_M6II_CRX_PROBE
+#include "crx_probe.h"
+#endif
 
 struct chs_entry
 {
@@ -133,6 +136,200 @@ void ErrCardForLVApp_handler(void)
 
 void _engio_write(uint32_t* reg_list) { return; }
 
+
+
+#ifdef CONFIG_M6II_CRX_PROBE
+
+#define M6II_CRX_INIT_ADDR      0xE0300ED0u
+#define M6II_CRX_SETPARAM_ADDR  0xE0301050u
+#define M6II_CRX_START_ADDR     0xE0301306u
+
+static struct m6ii_crx_cap_file m6ii_crx_capture;
+static volatile uint32_t m6ii_crx_capture_armed = 0;
+static volatile uint32_t m6ii_crx_capture_seq = 0;
+
+static struct patch m6ii_crx_patches[3];
+static uint8_t m6ii_crx_hook_code[3][8] __attribute__((aligned(4)));
+static int m6ii_crx_hooks_installed = 0;
+
+static void m6ii_crx_copy_blob(uint8_t *dst, uint32_t src, uint32_t size)
+{
+    if (!src)
+    {
+        memset(dst, 0, size);
+        return;
+    }
+    memcpy(dst, (const void *)src, size);
+}
+
+static void m6ii_crx_capture_args(uint32_t kind, uint32_t arg0,
+                                  uint32_t arg1, uint32_t arg2)
+{
+    if (!m6ii_crx_capture_armed)
+        return;
+
+    uint32_t i = m6ii_crx_capture.record_count;
+    if (i >= M6II_CRX_CAP_MAX)
+        return;
+
+    struct m6ii_crx_cap_record *r = &m6ii_crx_capture.records[i];
+    memset(r, 0, sizeof(*r));
+    r->kind = kind;
+    r->seq = m6ii_crx_capture_seq++;
+    r->arg0 = arg0;
+    r->arg1 = arg1;
+    r->arg2 = arg2;
+
+    m6ii_crx_copy_blob(r->blob1, arg1, M6II_CRX_BLOB1_SIZE);
+    if (kind == M6II_CRX_CAP_START)
+        m6ii_crx_copy_blob(r->blob2, arg2, M6II_CRX_BLOB2_SIZE);
+
+    m6ii_crx_capture.record_count = i + 1;
+}
+
+static void m6ii_crx_capture_init(uint32_t a0, uint32_t a1, uint32_t a2)
+{
+    m6ii_crx_capture_args(M6II_CRX_CAP_INIT, a0, a1, a2);
+}
+static void m6ii_crx_capture_setparam(uint32_t a0, uint32_t a1, uint32_t a2)
+{
+    m6ii_crx_capture_args(M6II_CRX_CAP_SET_PARAM, a0, a1, a2);
+}
+static void m6ii_crx_capture_start(uint32_t a0, uint32_t a1, uint32_t a2)
+{
+    m6ii_crx_capture_args(M6II_CRX_CAP_START, a0, a1, a2);
+}
+
+static void __attribute__((noinline,naked,aligned(4))) m6ii_crx_init_trampoline(void)
+{
+    asm volatile(
+        "push {r0-r12, lr}\n"
+        "mov  r3, %0\n"
+        "blx  r3\n"
+        "pop  {r0-r12, lr}\n"
+        "push.w {r0-r8, lr}\n"
+        "mov  r6, r0\n"
+        "movw r7, #0x43B8\n"
+        "movt r7, #0x0001\n"
+        "movw r3, #0x0ED9\n"
+        "movt r3, #0xE030\n"
+        "bx   r3\n"
+        : : "r"(m6ii_crx_capture_init) : "r3"
+    );
+}
+
+static void __attribute__((noinline,naked,aligned(4))) m6ii_crx_setparam_trampoline(void)
+{
+    asm volatile(
+        "push {r0-r12, lr}\n"
+        "mov  r3, %0\n"
+        "blx  r3\n"
+        "pop  {r0-r12, lr}\n"
+        "push.w {r4-r11, lr}\n"
+        "mov  r10, r0\n"
+        "movw r11, #0x43B8\n"
+        "movt r11, #0x0001\n"
+        "movw r3, #0x105B\n"
+        "movt r3, #0xE030\n"
+        "bx   r3\n"
+        : : "r"(m6ii_crx_capture_setparam) : "r3"
+    );
+}
+
+static void __attribute__((noinline,naked,aligned(4))) m6ii_crx_start_trampoline(void)
+{
+    asm volatile(
+        "push {r0-r12, lr}\n"
+        "mov  r3, %0\n"
+        "blx  r3\n"
+        "pop  {r0-r12, lr}\n"
+        "push.w {r0-r2,r4-r11,lr}\n"
+        "mov  r4, r1\n"
+        "movw r0, #0x43B8\n"
+        "movt r0, #0x0001\n"
+        "movw r3, #0x130F\n"
+        "movt r3, #0xE030\n"
+        "bx   r3\n"
+        : : "r"(m6ii_crx_capture_start) : "r3"
+    );
+}
+
+void m6ii_crx_cap_reset(void)
+{
+    memset(&m6ii_crx_capture, 0, sizeof(m6ii_crx_capture));
+    m6ii_crx_capture.magic = M6II_CRX_CAP_MAGIC;
+    m6ii_crx_capture.version = M6II_CRX_CAP_VERSION;
+    m6ii_crx_capture.record_size = sizeof(struct m6ii_crx_cap_record);
+    m6ii_crx_capture_seq = 0;
+}
+
+static int m6ii_crx_make_patch(int index, uint32_t addr, uint32_t target,
+                               const uint8_t expected[8], const char *desc)
+{
+    struct function_hook_patch def =
+    {
+        .patch_addr = addr,
+        .target_function_addr = target,
+        .description = desc,
+    };
+    for (int i = 0; i < 8; i++) def.orig_content[i] = expected[i];
+    return convert_f_patch_to_patch(&def, &m6ii_crx_patches[index],
+                                    &m6ii_crx_hook_code[index][0]);
+}
+
+int m6ii_crx_cap_install(void)
+{
+    if (m6ii_crx_hooks_installed) return E_PATCH_OK;
+
+    static const uint8_t init_expected[8] =
+        {0x2D,0xE9,0xFF,0x41,0x06,0x46,0x34,0x4F};
+    static const uint8_t set_expected[8] =
+        {0x2D,0xE9,0xF0,0x4F,0x82,0x46,0xDF,0xF8};
+    static const uint8_t start_expected[8] =
+        {0x2D,0xE9,0xF7,0x4F,0x0C,0x46,0x61,0x48};
+
+    memset(m6ii_crx_patches, 0, sizeof(m6ii_crx_patches));
+    memset(m6ii_crx_hook_code, 0, sizeof(m6ii_crx_hook_code));
+
+    int err = m6ii_crx_make_patch(0, M6II_CRX_INIT_ADDR,
+        (uint32_t)m6ii_crx_init_trampoline, init_expected, "M6II CRX Init trace");
+    if (err != E_PATCH_OK) return err;
+    err = m6ii_crx_make_patch(1, M6II_CRX_SETPARAM_ADDR,
+        (uint32_t)m6ii_crx_setparam_trampoline, set_expected, "M6II CRX SetParam trace");
+    if (err != E_PATCH_OK) return err;
+    err = m6ii_crx_make_patch(2, M6II_CRX_START_ADDR,
+        (uint32_t)m6ii_crx_start_trampoline, start_expected, "M6II CRX Start trace");
+    if (err != E_PATCH_OK) return err;
+
+    err = apply_patches(m6ii_crx_patches, 3);
+    if (err == E_PATCH_OK)
+    {
+        m6ii_crx_hooks_installed = 1;
+        m6ii_crx_capture_armed = 1;
+    }
+    return err;
+}
+
+int m6ii_crx_cap_remove(void)
+{
+    m6ii_crx_capture_armed = 0;
+    if (!m6ii_crx_hooks_installed) return E_PATCH_OK;
+
+    int e0 = unpatch_memory(M6II_CRX_INIT_ADDR);
+    int e1 = unpatch_memory(M6II_CRX_SETPARAM_ADDR);
+    int e2 = unpatch_memory(M6II_CRX_START_ADDR);
+    if (e0 == E_UNPATCH_OK && e1 == E_UNPATCH_OK && e2 == E_UNPATCH_OK)
+    {
+        m6ii_crx_hooks_installed = 0;
+        return E_PATCH_OK;
+    }
+    return e0 != E_UNPATCH_OK ? e0 : (e1 != E_UNPATCH_OK ? e1 : e2);
+}
+
+uint32_t m6ii_crx_cap_count(void) { return m6ii_crx_capture.record_count; }
+const struct m6ii_crx_cap_file *m6ii_crx_cap_data(void) { return &m6ii_crx_capture; }
+
+#endif /* CONFIG_M6II_CRX_PROBE */
 
 /*
  * M6II DIGIC-8 port of Bilal/a1ex SD UHS post-register-write hook.
