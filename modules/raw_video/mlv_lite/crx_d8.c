@@ -42,12 +42,15 @@ struct crx_buf_desc
  */
 struct crx_start_record
 {
-    uint32_t top0;
-    uint32_t size0;
-    uint32_t cur0;
-    uint32_t top1;
-    uint32_t size1;
-    uint32_t cur1;
+    /* Canon's 12-byte DEnc buffer descriptor: offset/reserved, capacity, address. */
+    uint32_t offset0;
+    uint32_t capacity0;
+    uint32_t address0;
+
+    /* Optional second span (used for wrapped/ring buffers); zero for POC. */
+    uint32_t offset1;
+    uint32_t capacity1;
+    uint32_t address1;
 };
 
 struct crx_start_desc
@@ -398,9 +401,9 @@ int crx_d8_compress_raw_rectangle(
     for (i = 0; i < 4; i++)
     {
         uint8_t *p = encoded_base + i * segment_capacity;
-        records[i].top0 = (uint32_t)p;
-        records[i].size0 = segment_capacity;
-        records[i].cur0 = (uint32_t)p;
+        records[i].offset0 = 0;
+        records[i].capacity0 = segment_capacity;
+        records[i].address0 = (uint32_t)p;
     }
 
     start_desc.count = 8;           /* four 24-byte logical records */
