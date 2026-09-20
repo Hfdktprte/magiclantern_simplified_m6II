@@ -30,6 +30,8 @@
 #define MLV_VIDEO_CLASS_FLAG_LZMA    0x80
 #define MLV_VIDEO_CLASS_FLAG_DELTA   0x40
 #define MLV_VIDEO_CLASS_FLAG_LJ92    0x20
+/* Experimental Canon CRX payload in VIDF; codec metadata is carried in CRXH. */
+#define MLV_VIDEO_CLASS_FLAG_CRX     0x200
 
 #define MLV_AUDIO_CLASS_FLAG_LZMA    0x80
 
@@ -91,6 +93,17 @@ typedef struct {
     uint16_t    yRes;               /* Configured video resolution, may differ from payload resolution */
     raw_info_t  raw_info;           /* the raw_info structure delivered by raw.c of ML Core */
 }  mlv_rawi_hdr_t;
+
+typedef struct {
+    uint8_t     blockType[4];       /* CRXH: Canon CRX stream-level codec header */
+    uint32_t    blockSize;
+    uint64_t    timestamp;
+    uint32_t    version;            /* experimental block version, currently 1 */
+    uint32_t    flags;              /* bit 0: lossless / DWT level 0 */
+    uint32_t    mainHeaderSize;     /* bytes immediately following this struct */
+    uint32_t    reserved;
+ /* uint8_t     mainHeader[variable]; */
+}  mlv_crxh_hdr_t;
 
 typedef struct {
     uint8_t     blockType[4];       /* RAWC: raw image capture information */
