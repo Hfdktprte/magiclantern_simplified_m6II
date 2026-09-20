@@ -29,16 +29,16 @@ jobs:
             libnewlib-arm-none-eabi \
             python3 \
             python3-docutils \
+            python3-setuptools \
             zip
 
-      - name: Build mlv_lite first
+      - name: Clean modules and M6II
         run: |
-          make -C modules/raw_video/mlv_lite clean
-          make -C modules/raw_video/mlv_lite FATAL_WARNINGS=n -j2
+          make -C modules clean
+          make -C platform/M6II.111 clean
 
       - name: Build EOS M6 Mark II 1.1.1
         run: |
-          make -C platform/M6II.111 clean
           make -C platform/M6II.111 FATAL_WARNINGS=n -j2
 
       - name: Collect build
