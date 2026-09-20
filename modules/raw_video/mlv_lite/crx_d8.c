@@ -30,6 +30,19 @@
 #define CRX_ALIGN               0x40
 #define CRX_TIMEOUT_MS          1000
 
+/*
+ * Safety gate.
+ *
+ * The reverse-engineering notes establish that CRawDirectEncStart requires a
+ * real Canon algsmgr context, and that the unknown Init/SetParam fields must be
+ * cloned from a known-good Canon CRX setup rather than invented.  Until that
+ * capture path is implemented, keep the direct low-level POC disabled.
+ *
+ * Do not set this to 1 for a camera build unless those prerequisites have been
+ * mapped and supplied by Canon's own initialization path.
+ */
+#define CRX_D8_UNSAFE_DIRECT_POC 0
+
 struct crx_buf_desc
 {
     void *ptr;
@@ -170,7 +183,17 @@ static void crx_complete_cb(uint32_t id, uint32_t sequence, uint32_t status,
 
 int crx_d8_supported(void)
 {
+#if CRX_D8_UNSAFE_DIRECT_POC
     return is_camera("M6II", "1.1.1");
+#else
+    /*
+     * Fail closed.  A successful compile is not sufficient evidence that the
+     * direct encoder ABI is safe.  Keep the menu/backend unavailable until a
+     * valid Canon-owned algsmgr context and known-good parameter templates are
+     * captured from the firmware path.
+     */
+    return 0;
+#endif
 }
 
 static uint32_t crx_raw_bytes(int width, int height)
