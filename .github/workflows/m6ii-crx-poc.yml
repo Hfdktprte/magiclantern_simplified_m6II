@@ -1,0 +1,52 @@
+name: M6II CRX MLV POC build
+
+on:
+  pull_request:
+    branches:
+      - M6II-MLV-Experiments
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-m6ii:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            gcc-arm-none-eabi \
+            binutils-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            python3 \
+            zip
+
+      - name: Build mlv_lite first
+        run: |
+          make -C modules/raw_video/mlv_lite clean
+          make -C modules/raw_video/mlv_lite -j2
+
+      - name: Build EOS M6 Mark II 1.1.1
+        run: |
+          make -C platform/M6II.111 clean
+          make -C platform/M6II.111 -j2
+
+      - name: Collect build
+        run: |
+          mkdir -p artifacts
+          cp platform/M6II.111/build/autoexec.bin artifacts/
+          cp platform/M6II.111/build/magiclantern.zip artifacts/
+          cp modules/raw_video/mlv_lite/build/mlv_lite.mo artifacts/
+
+      - name: Upload M6II CRX build
+        uses: actions/upload-artifact@v4
+        with:
+          name: M6II-CRX-MLV-POC
+          path: artifacts/
+          if-no-files-found: error
