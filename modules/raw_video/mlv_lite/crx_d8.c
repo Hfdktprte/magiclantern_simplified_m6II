@@ -33,13 +33,11 @@
 /*
  * Safety gate.
  *
- * The reverse-engineering notes establish that CRawDirectEncStart requires a
- * real Canon algsmgr context, and that the unknown Init/SetParam fields must be
- * cloned from a known-good Canon CRX setup rather than invented.  Until that
- * capture path is implemented, keep the direct low-level POC disabled.
- *
- * Do not set this to 1 for a camera build unless those prerequisites have been
- * mapped and supplied by Canon's own initialization path.
+ * ROM analysis establishes that CRawDirectEncStart treats its third argument
+ * as an opaque completion cookie; this backend now supplies and validates its
+ * own cookie.  The remaining unknown Init/SetParam fields must still be cloned
+ * from a known-good Canon CRX setup rather than invented, so keep the direct
+ * low-level POC disabled until those parameter templates are captured.
  */
 #define CRX_D8_UNSAFE_DIRECT_POC 0
 
@@ -109,6 +107,12 @@ static volatile uint32_t crx_result_count = 0;
 static uint32_t crx_result_addresses[CRX_RESULT_MAX];
 static uint32_t crx_result_sizes[CRX_RESULT_MAX];
 
+/*
+ * CRawDirectEncStart stores this opaque value and forwards it unchanged as the
+ * sixth completion-callback argument.  It is not dereferenced by the encoder.
+ */
+static uint32_t crx_callback_cookie = 0x43525838; /* "CRX8" */
+
 static uint8_t crx_main_header_buf[CRX_MAIN_HEADER_MAX] __attribute__((aligned(64)));
 static uint32_t crx_main_header_size = 0;
 static int crx_active = 0;
@@ -162,7 +166,10 @@ static void crx_complete_cb(uint32_t id, uint32_t sequence, uint32_t status,
                             struct crx_result *result,
                             uint32_t opaque0, uint32_t opaque1)
 {
-    (void)id; (void)sequence; (void)status; (void)opaque0; (void)opaque1;
+    (void)id; (void)sequence; (void)status; (void)opaque0;
+
+    if (opaque1 != (uint32_t)&crx_callback_cookie)
+        return;
 
     crx_done_valid = 0;
     crx_result_count = 0;
@@ -192,8 +199,7 @@ int crx_d8_supported(void)
     /*
      * Fail closed.  A successful compile is not sufficient evidence that the
      * direct encoder ABI is safe.  Keep the menu/backend unavailable until a
-     * valid Canon-owned algsmgr context and known-good parameter templates are
-     * captured from the firmware path.
+     * known-good parameter templates are captured from the firmware path.
      */
     return 0;
 #endif
@@ -449,7 +455,8 @@ int crx_d8_compress_raw_rectangle(
     crx_done_valid = 0;
     crx_result_count = 0;
 
-    M6II_CRAW_DIRECT_ENC_START(CRX_ENCODER_ID, &start_desc, 0);
+    M6II_CRAW_DIRECT_ENC_START(CRX_ENCODER_ID, &start_desc,
+                               &crx_callback_cookie);
 
     err = take_semaphore(crx_sem, CRX_TIMEOUT_MS);
     if (err)
