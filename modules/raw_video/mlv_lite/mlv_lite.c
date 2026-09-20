@@ -4650,7 +4650,7 @@ static unsigned int raw_rec_init()
         raw_video_menu->children[11].shidden = 1; // Hide "Small hacks"
         small_hacks = 0;
     }
-    if (cam_m6ii)
+    if (cam_m6ii && crx_d8_supported())
     {
         /* experimental D8 CRX backend: expose 14-bit lossless only */
         raw_video_menu->children[2].max = 3;
