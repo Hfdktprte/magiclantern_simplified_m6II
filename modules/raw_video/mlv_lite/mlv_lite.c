@@ -75,7 +75,7 @@
 #include "timer.h"
 #include "ml-cbr.h"
 #include "../../silent/lossless.h"
-#include "ml-cbr.h"
+#include "crx_d8.h"
 
 THREAD_ROLE(RawRecTask);            /* our raw recording task */
 THREAD_ROLE(ShootTask);             /* polling CBR */
@@ -102,6 +102,7 @@ static int cam_700d = 0;
 static int cam_60d = 0;
 static int cam_100d = 0;
 static int cam_1100d = 0;
+static int cam_m6ii = 0;
 
 static int cam_5d3 = 0;
 static int cam_5d3_113 = 0;
@@ -173,6 +174,8 @@ static CONFIG_INT("raw.output_format", output_format, 3);
 #define OUTPUT_12BIT_LOSSLESS 4
 #define OUTPUT_AUTO_BIT_LOSSLESS 5
 #define OUTPUT_COMPRESSION (output_format>2)
+#define OUTPUT_CRX (cam_m6ii && output_format == OUTPUT_14BIT_LOSSLESS)
+#define OUTPUT_LJ92 (OUTPUT_COMPRESSION && !OUTPUT_CRX)
 
 /* container BPP (variable for uncompressed, always 14 for lossless JPEG) */
 static const int bpp_container[] = { 14, 12, 10, 14, 14, 14, 14, 14, 14 };
@@ -372,6 +375,8 @@ static struct msg_queue * compress_mq = 0;
 static GUARDED_BY(RawRecTask)   mlv_file_hdr_t file_hdr[CARD_COUNT];
 static GUARDED_BY(RawRecTask)   mlv_rawi_hdr_t rawi_hdr;
 static GUARDED_BY(RawRecTask)   mlv_rawc_hdr_t rawc_hdr;
+static GUARDED_BY(RawRecTask)   uint8_t crxh_storage[sizeof(mlv_crxh_hdr_t) + 0x80];
+static GUARDED_BY(RawRecTask)   mlv_crxh_hdr_t *crxh_hdr = 0;
 static GUARDED_BY(RawRecTask)   mlv_idnt_hdr_t idnt_hdr;
 static GUARDED_BY(RawRecTask)   mlv_expo_hdr_t expo_hdr;
 static GUARDED_BY(RawRecTask)   mlv_lens_hdr_t lens_hdr;
@@ -727,9 +732,14 @@ void update_resolution_params()
     
     max_frame_size = frame_size_padded;
 
-    if (OUTPUT_COMPRESSION)
+    if (OUTPUT_CRX)
     {
-        /* assume the compressed output will not exceed uncompressed frame size */
+        uint32_t crx_payload = crx_d8_slot_payload_capacity(res_x, res_y);
+        max_frame_size = (VIDF_HDR_SIZE + crx_payload + 4 + 4095) & ~4095;
+    }
+    else if (OUTPUT_COMPRESSION)
+    {
+        /* assume the LJ92 compressed output will not exceed uncompressed frame size */
         /* max frame size for the lossless routine also has unusual alignment requirements */
         if (max_frame_size > 10*1024*1024)
         {
@@ -1037,7 +1047,7 @@ void refresh_raw_settings(int force)
             setup_bit_depth_digital_gain(0);
 
             /* update compression ratio once every 2 seconds */
-            if (OUTPUT_COMPRESSION && compress_mq && should_run_polling_action(2000, &aux2))
+            if (OUTPUT_LJ92 && compress_mq && should_run_polling_action(2000, &aux2))
             {
                 measure_compression_ratio();
             }
@@ -2748,7 +2758,8 @@ static void compress_task()
                 printf("EDMAC copy resources locked.\n");
             }
 
-            edmac_start_spy();
+            if (!OUTPUT_CRX)
+                edmac_start_spy();
 
             continue;
         }
@@ -2764,7 +2775,8 @@ static void compress_task()
                 printf("EDMAC copy resources unlocked.\n");
             }
 
-            edmac_stop_spy();
+            if (!OUTPUT_CRX)
+                edmac_stop_spy();
 
             continue;
         }
@@ -2786,59 +2798,68 @@ static void compress_task()
 
         if (OUTPUT_COMPRESSION)
         {
-            /* PackMem appears to require stricter memory alignment */
+            int compressed_size = -1;
+            uint32_t payload_capacity = max_frame_size - VIDF_HDR_SIZE - 4;
+
             ASSERT(((uint32_t)out_ptr & 0x3F) == 0);
-            ASSERT((max_frame_size & 0xFFF) == 0);
-            struct memSuite * outSuite = CreateMemorySuite(out_ptr, max_frame_size, 0);
-            ASSERT(outSuite);
 
-            int compressed_size = lossless_compress_raw_rectangle(
-                outSuite, fullSizeBuffer,
-                raw_info.width, (skip_x + 7) & ~7, skip_y & ~1,
-                res_x, res_y
-            );
-
-            /* only report compression errors while recording
-             * some of them appear during video mode switches
-             * unlikely to cause actual trouble - silence them for now */
-            if (compressed_size < 0 && !RAW_IS_IDLE)
+            if (OUTPUT_CRX)
             {
-                printf("Compression error %d at frame %d\n", compressed_size, frame_count-1);
-                ASSERT(0);
+                compressed_size = crx_d8_compress_raw_rectangle(
+                    out_ptr, payload_capacity,
+                    fullSizeBuffer, raw_info.pitch,
+                    (skip_x + 7) & ~7, skip_y & ~1,
+                    res_x, res_y
+                );
+            }
+            else
+            {
+                ASSERT((max_frame_size & 0xFFF) == 0);
+                struct memSuite * outSuite = CreateMemorySuite(out_ptr, max_frame_size, 0);
+                ASSERT(outSuite);
+
+                compressed_size = lossless_compress_raw_rectangle(
+                    outSuite, fullSizeBuffer,
+                    raw_info.width, (skip_x + 7) & ~7, skip_y & ~1,
+                    res_x, res_y
+                );
+
+                DeleteMemorySuite(outSuite);
             }
 
-            DeleteMemorySuite(outSuite);
-
-            if (1)
+            if (compressed_size < 0)
             {
-                if (compressed_size >= frame_size_uncompressed)
-                {
-                    printf("\nCompressed size higher than uncompressed - corrupted frame?\n");
-                    printf("Please reboot, then decrease vertical resolution in crop_rec menu.\n\n");
-                    buffer_full = 1;
-                    ASSERT(0);
-                }
-                else if (compressed_size > max_frame_size - VIDF_HDR_SIZE - 4)
-                {
-                    printf("Compressed size too high - too much detail or noise?\n");
-                    printf("Consider using uncompressed 10/12-bit.");
-                    buffer_full = 1;
-                    ASSERT(0);
-                }
-
-                /* resize frame slots on the fly, to compressed size */
-                if (!RAW_IS_IDLE)
-                {
-                    shrink_slot(slot_index, MIN(compressed_size, max_frame_size - VIDF_HDR_SIZE - 4));
-                }
-                
-                /* our old EDMAC check assumes frame sizes known in advance - not the case here */
-                frame_fake_edmac_check(slot_index);
+                printf("Compression error %d at frame %d\n",
+                       compressed_size, frame_count-1);
+                buffer_full = 1;
+                memset(out_ptr, 0, 4);
+                compressed_size = 4;
             }
 
-            if (compressed_size > 0)
+            if (!OUTPUT_CRX && compressed_size >= frame_size_uncompressed)
             {
-                measured_compression_ratio = (compressed_size/128) * 100 / (frame_size_uncompressed/128);
+                printf("\nLJ92 size higher than uncompressed - corrupted frame?\n");
+                buffer_full = 1;
+            }
+            else if ((uint32_t)compressed_size > payload_capacity)
+            {
+                printf("Compressed frame exceeded slot capacity.\n");
+                buffer_full = 1;
+                memset(out_ptr, 0, 4);
+                compressed_size = 4;
+            }
+
+            if (!RAW_IS_IDLE)
+            {
+                shrink_slot(slot_index, compressed_size);
+            }
+
+            frame_fake_edmac_check(slot_index);
+
+            if (compressed_size > 0 && frame_size_uncompressed > 0)
+            {
+                measured_compression_ratio =
+                    (compressed_size/128) * 100 / MAX(1, frame_size_uncompressed/128);
             }
         }
         else
@@ -3103,7 +3124,8 @@ void init_mlv_chunk_headers(struct raw_info *raw_info)
         file_hdr[i].fileCount = 0; //autodetect
         file_hdr[i].fileFlags = 4;
         file_hdr[i].videoClass = MLV_VIDEO_CLASS_RAW |
-            (OUTPUT_COMPRESSION ? MLV_VIDEO_CLASS_FLAG_LJ92 : 0);
+            (OUTPUT_CRX ? MLV_VIDEO_CLASS_FLAG_CRX :
+             OUTPUT_LJ92 ? MLV_VIDEO_CLASS_FLAG_LJ92 : 0);
         file_hdr[i].audioClass = 0;
         file_hdr[i].videoFrameCount = 0; //autodetect
         file_hdr[i].audioFrameCount = 0;
@@ -3122,6 +3144,26 @@ void init_mlv_chunk_headers(struct raw_info *raw_info)
     rawi_hdr.xRes = res_x;
     rawi_hdr.yRes = res_y;
     rawi_hdr.raw_info = *raw_info;
+
+    crxh_hdr = 0;
+    if (OUTPUT_CRX)
+    {
+        uint32_t main_size = 0;
+        const void *main_header = crx_d8_main_header(&main_size);
+
+        if (main_header && main_size && main_size <= 0x80)
+        {
+            crxh_hdr = (mlv_crxh_hdr_t *)crxh_storage;
+            memset(crxh_storage, 0, sizeof(crxh_storage));
+            mlv_set_type((mlv_hdr_t *)crxh_hdr, "CRXH");
+            mlv_set_timestamp((mlv_hdr_t *)crxh_hdr, mlv_start_timestamp);
+            crxh_hdr->blockSize = sizeof(mlv_crxh_hdr_t) + main_size;
+            crxh_hdr->version = 1;
+            crxh_hdr->flags = 1; /* lossless / DWT level 0 */
+            crxh_hdr->mainHeaderSize = main_size;
+            memcpy(crxh_storage + sizeof(mlv_crxh_hdr_t), main_header, main_size);
+        }
+    }
 
     memset(&rawc_hdr, 0, sizeof(mlv_rawc_hdr_t));
     mlv_set_type((mlv_hdr_t *)&rawc_hdr, "RAWC");
@@ -3178,6 +3220,13 @@ int write_mlv_chunk_headers(FILE *f, int chunk, int card_index)
     {
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&rawi_hdr);
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&rawc_hdr);
+        if (OUTPUT_CRX)
+        {
+            if (!crxh_hdr)
+                fail = 1;
+            else
+                fail |= !mlv_write_hdr(f, (mlv_hdr_t *)crxh_hdr);
+        }
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&idnt_hdr);
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&expo_hdr);
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&lens_hdr);
@@ -3458,6 +3507,21 @@ void raw_video_rec_task(uint32_t card_index)
         {
             NotifyBox(5000, "RAW bit depth unavailable");
             goto cleanup;
+        }
+
+        if (OUTPUT_CRX)
+        {
+            if (pre_record || use_h264_proxy())
+            {
+                NotifyBox(5000, "CRX POC: disable pre-record/H.264 proxy");
+                goto cleanup;
+            }
+
+            if (!crx_d8_start_recording(res_x, res_y))
+            {
+                NotifyBox(5000, "CRX encoder init failed");
+                goto cleanup;
+            }
         }
 
         /* create output file */
@@ -3959,6 +4023,9 @@ cleanup:
 
     if (card_index == 0) // avoid cleaning up twice on dual slot cams
     {
+        if (OUTPUT_CRX)
+            crx_d8_stop_recording();
+
         take_semaphore(settings_sem, 0);
         free_buffers();
         restore_bit_depth();
@@ -4544,6 +4611,7 @@ static unsigned int raw_rec_init()
     cam_100d  = is_camera("100D", "1.0.1");
     cam_500d  = is_camera("500D", "1.1.1");
     cam_1100d = is_camera("1100D", "1.0.5");
+    cam_m6ii  = is_camera("M6II", "1.1.1");
 
     cam_5d3_113 = is_camera("5D3",  "1.1.3");
     cam_5d3_123 = is_camera("5D3",  "1.2.3");
@@ -4582,11 +4650,18 @@ static unsigned int raw_rec_init()
         raw_video_menu->children[11].shidden = 1; // Hide "Small hacks"
         small_hacks = 0;
     }
-    if (version != 5)
-    { // so far, only Digic 5 has working lossless compression, hide on other cams
+    if (cam_m6ii)
+    {
+        /* experimental D8 CRX backend: expose 14-bit lossless only */
+        raw_video_menu->children[2].max = 3;
+        if (output_format > OUTPUT_14BIT_LOSSLESS)
+            output_format = OUTPUT_14BIT_LOSSLESS;
+    }
+    else if (version != 5)
+    {
         if (raw_video_menu->children[2].max > 2)
         {
-            raw_video_menu->children[2].max = 2; // hide lossless options, keep 14/12/10-bit uncompressed
+            raw_video_menu->children[2].max = 2;
             if (output_format > 2)
                 output_format = 0;
         }
