@@ -31,15 +31,17 @@
 #define CRX_TIMEOUT_MS          1000
 
 /*
- * Safety gate.
+ * The direct path below is restricted to Canon's mode-0, single-tile lossless
+ * configuration reconstructed from the M6 II 1.1.1 ROM.  In that path:
+ *   encoder id = 0
+ *   DwtLevel   = 0
+ *   ctx mode   = 1
+ *   one tile is used while frame width < 4096
  *
- * ROM analysis establishes that CRawDirectEncStart treats its third argument
- * as an opaque completion cookie; this backend now supplies and validates its
- * own cookie.  The remaining unknown Init/SetParam fields must still be cloned
- * from a known-good Canon CRX setup rather than invented, so keep the direct
- * low-level POC disabled until those parameter templates are captured.
+ * CRawDirectEncStart forwards its third argument unchanged to the completion
+ * callback, so a module-owned cookie is valid and is checked there.
  */
-#define CRX_D8_UNSAFE_DIRECT_POC 0
+#define CRX_D8_DIRECT_POC 1
 
 struct crx_buf_desc
 {
@@ -193,14 +195,9 @@ static void crx_complete_cb(uint32_t id, uint32_t sequence, uint32_t status,
 
 int crx_d8_supported(void)
 {
-#if CRX_D8_UNSAFE_DIRECT_POC
+#if CRX_D8_DIRECT_POC
     return is_camera("M6II", "1.1.1");
 #else
-    /*
-     * Fail closed.  A successful compile is not sufficient evidence that the
-     * direct encoder ABI is safe.  Keep the menu/backend unavailable until a
-     * known-good parameter templates are captured from the firmware path.
-     */
     return 0;
 #endif
 }
@@ -240,18 +237,21 @@ static void crx_build_init_param(uint8_t p[CRX_INIT_SIZE], int width, int height
     put_u32(p, 0x18, 0);
     put_u32(p, 0x1c, 0);
     put_u32(p, 0x20, 0);
-    put_u32(p, 0x24, 0);          /* CtMode / lossless RAW path */
-    put_u32(p, 0x28, 0);
-    put_u32(p, 0x2c, 0x1001);     /* Canon direct-encoder buffer mode */
+    /* Canon mode-map E02ACDE8, mode code 0, root flags clear. */
+    put_u32(p, 0x24, 0);          /* mode-dependent field: mode 0 => 0 */
+    put_u32(p, 0x28, 0);          /* table +0x20 in Canon's builder */
+    put_u32(p, 0x2c, 1);          /* Canon ctx +0x2c for mode 0 */
     put_u32(p, 0x30, 0x10);
     p[0x34] = 8;
 
+    /* Canon puts its status callback at +0x48 and result callback at +0x4c. */
     put_u32(p, 0x48, (uint32_t)crx_status_cb);
     put_u32(p, 0x4c, (uint32_t)crx_complete_cb);
-    put_u32(p, 0x50, 0);
+    put_u32(p, 0x50, 0);          /* root +0xd8 bit 0, clear in mode-0 POC */
 
-    /* Canon computes this field from bit depth and plane configuration. */
-    put_u16(p, 0x54, 7);
+    /* Canon: (BitDepth * table_entry[+0x1c]) >> 3; for contiguous input,
+     * table_entry[+0x1c] is the active width in samples. */
+    put_u16(p, 0x54, (uint16_t)(((uint32_t)width * 14u) >> 3));
 }
 
 int crx_d8_start_recording(int width, int height)
@@ -263,7 +263,9 @@ int crx_d8_start_recording(int width, int height)
     if (!crx_d8_supported())
         return 0;
 
-    if (width < 44 || height < 44 || width > 0xffff || height > 0xffff)
+    /* Canon mode-0 builder uses one tile below 4096 pixels.  Keep the first
+     * enabled POC inside that proven geometry instead of guessing multi-tile. */
+    if (width < 44 || height < 44 || width >= 4096 || height > 0xffff)
         return 0;
 
     if ((width & 7) || (height & 1))
@@ -379,8 +381,7 @@ int crx_d8_compress_raw_rectangle(
     uint32_t encoded_capacity;
     uint8_t *base;
     uint8_t *encoded_base;
-    uint32_t segment_capacity;
-    struct crx_start_record records[4] __attribute__((aligned(16)));
+    struct crx_start_record record __attribute__((aligned(16)));
     struct crx_start_desc start_desc;
     struct crx_set_param setp;
     struct crx_buf_desc sub_desc;
@@ -435,22 +436,20 @@ int crx_d8_compress_raw_rectangle(
 
     M6II_CRAW_DIRECT_ENC_SET_PARAM(CRX_ENCODER_ID, &setp);
 
-    memset(records, 0, sizeof(records));
-    segment_capacity = (encoded_capacity / 4u) & ~(CRX_ALIGN - 1);
-
-    if (segment_capacity < 0x1000)
+    /* E0301306 walks the descriptor count in steps of two; one lossless
+     * output record is therefore two 12-byte spans.  The second span is the
+     * optional ring-wrap segment and remains zero for this contiguous POC. */
+    memset(&record, 0, sizeof(record));
+    encoded_capacity &= ~(CRX_ALIGN - 1);
+    if (encoded_capacity < 0x1000)
         return -6;
 
-    for (i = 0; i < 4; i++)
-    {
-        uint8_t *p = encoded_base + i * segment_capacity;
-        records[i].offset0 = 0;
-        records[i].capacity0 = segment_capacity;
-        records[i].address0 = (uint32_t)p;
-    }
+    record.offset0 = 0;
+    record.capacity0 = encoded_capacity;
+    record.address0 = (uint32_t)encoded_base;
 
-    start_desc.count = 8;           /* four 24-byte logical records */
-    start_desc.record = records;
+    start_desc.count = 2;           /* one 24-byte logical output record */
+    start_desc.record = &record;
 
     crx_done_valid = 0;
     crx_result_count = 0;
