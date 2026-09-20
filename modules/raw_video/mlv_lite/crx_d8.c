@@ -117,6 +117,9 @@ static int crx_height = 0;
 static void *crx_staging_alloc = 0;
 static uint8_t *crx_staging = 0;
 static uint32_t crx_staging_size = 0;
+static int crx_hw_initialized = 0;
+static int crx_hw_width = 0;
+static int crx_hw_height = 0;
 
 static inline void put_u16(uint8_t *p, uint32_t off, uint16_t v)
 {
@@ -257,8 +260,14 @@ int crx_d8_start_recording(int width, int height)
     if (width < 44 || height < 44 || width > 0xffff || height > 0xffff)
         return 0;
 
-    if ((width & 1) || (height & 1))
+    if ((width & 7) || (height & 1))
         return 0;
+
+    if (crx_hw_initialized && (width != crx_hw_width || height != crx_hw_height))
+    {
+        printf("[CRX] restart geometry differs from initialized encoder\n");
+        return 0;
+    }
 
     if (!crx_sem)
         crx_sem = create_named_semaphore("crx_d8_sem", SEM_CREATE_LOCKED);
@@ -283,13 +292,18 @@ int crx_d8_start_recording(int width, int height)
     }
     crx_staging = (uint8_t *)ALIGN_UP((uintptr_t)UNCACHEABLE(crx_staging_alloc), CRX_ALIGN);
 
-    crx_build_init_param(init_param, width, height);
-
     crx_done_valid = 0;
     crx_result_count = 0;
     crx_main_header_size = 0;
 
-    M6II_CRAW_DIRECT_ENC_INIT(CRX_ENCODER_ID, init_param);
+    if (!crx_hw_initialized)
+    {
+        crx_build_init_param(init_param, width, height);
+        M6II_CRAW_DIRECT_ENC_INIT(CRX_ENCODER_ID, init_param);
+        crx_hw_initialized = 1;
+        crx_hw_width = width;
+        crx_hw_height = height;
+    }
 
     main_desc.ptr = UNCACHEABLE(crx_main_header_buf);
     main_desc.size = sizeof(crx_main_header_buf);
@@ -454,6 +468,8 @@ int crx_d8_compress_raw_rectangle(
     {
         if (!crx_result_addresses[i] || !crx_result_sizes[i])
             return -9;
+        if (crx_result_addresses[i] < (uint32_t)encoded_base || crx_result_sizes[i] > encoded_capacity || crx_result_addresses[i] > (uint32_t)encoded_base + encoded_capacity - crx_result_sizes[i])
+            return -10;
         if (payload_size > encoded_capacity - crx_result_sizes[i])
             return -10;
         payload_size += crx_result_sizes[i];
