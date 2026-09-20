@@ -443,6 +443,7 @@ static int init_block(mlv_block_header *orig_block)
     switch (orig_block->type)
     {
     case mlv_MLVI:
+        ; /* C99: label must precede a statement before declarations */
         mlv_file_block *block_1 = (mlv_file_block *)orig_block;
         block_1->size = sizeof(mlv_file_block);
         strncpy(block_1->version_string, MLV_VERSION_STRING, sizeof(block_1->version_string));
@@ -463,6 +464,7 @@ static int init_block(mlv_block_header *orig_block)
         return 0;
 
     case mlv_RAWI:
+        ; /* C99: label must precede a statement before declarations */
         mlv_rawi_block *block_2 = (mlv_rawi_block *)orig_block;
         block_2->size = sizeof(mlv_rawi_block);
         block_2->timestamp = get_us_clock() - session_start_timestamp;
@@ -485,6 +487,7 @@ static int init_block(mlv_block_header *orig_block)
         return 0;
 
     case mlv_RAWC:
+        ; /* C99: label must precede a statement before declarations */
         mlv_rawc_block *block_3 = (mlv_rawc_block *)orig_block;
         block_3->size = sizeof(mlv_rawc_block);
         block_3->timestamp = get_us_clock() - session_start_timestamp;
@@ -505,6 +508,7 @@ static int init_block(mlv_block_header *orig_block)
         return 0;
 
     case mlv_RTCI:
+        ; /* C99: label must precede a statement before declarations */
         mlv_rtci_block *block_4 = (mlv_rtci_block *)orig_block;
         block_4->size = sizeof(mlv_rtci_block);
         block_4->timestamp = get_us_clock() - session_start_timestamp;
@@ -524,6 +528,7 @@ static int init_block(mlv_block_header *orig_block)
         return 0;
 
     case mlv_EXPO:
+        ; /* C99: label must precede a statement before declarations */
         mlv_expo_block *block_5 = (mlv_expo_block *)orig_block;
         block_5->size = sizeof(mlv_expo_block);
         block_5->timestamp = get_us_clock() - session_start_timestamp;
@@ -547,6 +552,7 @@ static int init_block(mlv_block_header *orig_block)
         return 0;
 
     case mlv_LENS:
+        ; /* C99: label must precede a statement before declarations */
         mlv_lens_block *block_6 = (mlv_lens_block *)orig_block;
         block_6->size = sizeof(mlv_lens_block);
         block_6->timestamp = get_us_clock() - session_start_timestamp;
@@ -567,6 +573,7 @@ static int init_block(mlv_block_header *orig_block)
         return 0;
 
     case mlv_IDNT:
+        ; /* C99: label must precede a statement before declarations */
         mlv_idnt_block *block_7 = (mlv_idnt_block *)orig_block;
         block_7->size = sizeof(mlv_idnt_block);
         block_7->timestamp = get_us_clock() - session_start_timestamp;
@@ -578,6 +585,7 @@ static int init_block(mlv_block_header *orig_block)
         return 0;
 
     case mlv_WBAL:
+        ; /* C99: label must precede a statement before declarations */
         mlv_wbal_block *block_8 = (mlv_wbal_block *)orig_block;
         block_8->size = sizeof(mlv_wbal_block);
         block_8->timestamp = get_us_clock() - session_start_timestamp;
