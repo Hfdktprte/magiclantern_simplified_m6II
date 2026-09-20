@@ -113,6 +113,18 @@ static inline void put_u32(uint8_t *p, uint32_t off, uint32_t v)
 }
 
 /*
+ * Compact an encoded segment downward.  In this backend destination is always
+ * below source; copying forward is overlap-safe for that exact relationship.
+ */
+static void crx_move_down(uint8_t *dst, const uint8_t *src, uint32_t size)
+{
+    uint32_t i;
+    ASSERT(dst <= src);
+    for (i = 0; i < size; i++)
+        dst[i] = src[i];
+}
+
+/*
  * Canon invokes the +0x48 callback for encoder-side status events.
  * Keep this callback intentionally inert for the POC.
  */
@@ -437,9 +449,9 @@ int crx_d8_compress_raw_rectangle(
     final_dst = base + sub_size;
     for (i = 0; i < crx_result_count; i++)
     {
-        memmove(final_dst,
-                (void *)crx_result_addresses[i],
-                crx_result_sizes[i]);
+        crx_move_down(final_dst,
+                      (const uint8_t *)crx_result_addresses[i],
+                      crx_result_sizes[i]);
         final_dst += crx_result_sizes[i];
     }
 
