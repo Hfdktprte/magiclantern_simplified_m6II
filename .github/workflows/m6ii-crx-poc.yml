@@ -1,6 +1,9 @@
 name: M6II CRX MLV POC build
 
 on:
+  push:
+    branches:
+      - M6II-CRX-MLV-POC
   pull_request:
     branches:
       - M6II-MLV-Experiments
