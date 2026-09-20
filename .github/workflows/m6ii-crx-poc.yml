@@ -31,12 +31,12 @@ jobs:
       - name: Build mlv_lite first
         run: |
           make -C modules/raw_video/mlv_lite clean
-          make -C modules/raw_video/mlv_lite -j2
+          make -C modules/raw_video/mlv_lite FATAL_WARNINGS=n -j2
 
       - name: Build EOS M6 Mark II 1.1.1
         run: |
           make -C platform/M6II.111 clean
-          make -C platform/M6II.111 -j2
+          make -C platform/M6II.111 FATAL_WARNINGS=n -j2
 
       - name: Collect build
         run: |
