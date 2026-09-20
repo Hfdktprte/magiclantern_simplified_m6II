@@ -38,17 +38,24 @@ jobs:
           make -C platform/M6II.111 clean
 
       - name: Build EOS M6 Mark II 1.1.1
-        run: |
-          make -C platform/M6II.111 FATAL_WARNINGS=n -j2
-
-      - name: Collect build
+        shell: bash
         run: |
           mkdir -p artifacts
+          set +e
+          make -C platform/M6II.111 FATAL_WARNINGS=n -j2 2>&1 | tee artifacts/build.log
+          status=${PIPESTATUS[0]}
+          echo "build_status=$status" >> "$GITHUB_ENV"
+          exit "$status"
+
+      - name: Collect build
+        if: success()
+        run: |
           cp platform/M6II.111/build/autoexec.bin artifacts/
           cp platform/M6II.111/build/magiclantern.zip artifacts/
           cp modules/raw_video/mlv_lite/build/mlv_lite.mo artifacts/
 
-      - name: Upload M6II CRX build
+      - name: Upload M6II CRX build/log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: M6II-CRX-MLV-POC
