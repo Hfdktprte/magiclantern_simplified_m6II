@@ -2,7 +2,8 @@
 MODULE_NAME = mlv_lite
 MODULE_OBJS = $(BUILD_DIR)/mlv_lite.o \
               $(BUILD_DIR)/mlv.o \
-              $(BUILD_DIR)/lossless.o
+              $(BUILD_DIR)/lossless.o \
+              $(BUILD_DIR)/crx_d8.o
 TOP_DIR = ../../..
 
 # include modules environment
