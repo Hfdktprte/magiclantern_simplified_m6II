@@ -98,6 +98,9 @@ static uint32_t crx_main_header_size = 0;
 static int crx_active = 0;
 static int crx_width = 0;
 static int crx_height = 0;
+static void *crx_staging_alloc = 0;
+static uint8_t *crx_staging = 0;
+static uint32_t crx_staging_size = 0;
 
 static inline void put_u16(uint8_t *p, uint32_t off, uint16_t v)
 {
@@ -164,8 +167,7 @@ uint32_t crx_d8_slot_payload_capacity(int width, int height)
 {
     uint32_t raw = crx_raw_bytes(width, height);
     uint32_t encoded = raw * CRX_OUTPUT_FACTOR_NUM / CRX_OUTPUT_FACTOR_DEN;
-    uint32_t total = CRX_SUB_HEADER_MAX + CRX_ALIGN + encoded +
-                     CRX_ALIGN + raw + CRX_FRAME_GUARD;
+    uint32_t total = CRX_SUB_HEADER_MAX + CRX_ALIGN + encoded + CRX_FRAME_GUARD;
     return ALIGN_UP(total, 4096);
 }
 
@@ -226,6 +228,23 @@ int crx_d8_start_recording(int width, int height)
     if (!crx_sem)
         return 0;
 
+    if (crx_staging_alloc)
+    {
+        fio_free(crx_staging_alloc);
+        crx_staging_alloc = 0;
+        crx_staging = 0;
+        crx_staging_size = 0;
+    }
+
+    crx_staging_size = crx_raw_bytes(width, height);
+    crx_staging_alloc = fio_malloc(crx_staging_size + CRX_ALIGN);
+    if (!crx_staging_alloc)
+    {
+        printf("[CRX] staging alloc failed: %u\n", crx_staging_size);
+        return 0;
+    }
+    crx_staging = (uint8_t *)ALIGN_UP((uintptr_t)UNCACHEABLE(crx_staging_alloc), CRX_ALIGN);
+
     crx_build_init_param(init_param, width, height);
 
     crx_done_valid = 0;
@@ -274,6 +293,14 @@ void crx_d8_stop_recording(void)
     crx_height = 0;
     crx_done_valid = 0;
     crx_result_count = 0;
+
+    if (crx_staging_alloc)
+    {
+        fio_free(crx_staging_alloc);
+        crx_staging_alloc = 0;
+        crx_staging = 0;
+        crx_staging_size = 0;
+    }
 }
 
 const void *crx_d8_main_header(uint32_t *size)
@@ -294,7 +321,6 @@ int crx_d8_compress_raw_rectangle(
     uint32_t encoded_capacity;
     uint8_t *base;
     uint8_t *encoded_base;
-    uint8_t *staging;
     uint32_t segment_capacity;
     struct crx_start_record records[4] __attribute__((aligned(16)));
     struct crx_start_desc start_desc;
@@ -326,10 +352,7 @@ int crx_d8_compress_raw_rectangle(
     encoded_base = (uint8_t *)ALIGN_UP((uintptr_t)(base + CRX_SUB_HEADER_MAX),
                                        CRX_ALIGN);
     encoded_capacity &= ~(CRX_ALIGN - 1);
-    staging = (uint8_t *)ALIGN_UP((uintptr_t)(encoded_base + encoded_capacity),
-                                  CRX_ALIGN);
-
-    if ((uint32_t)(staging + raw_bytes - base) > dst_capacity)
+    if (!crx_staging || crx_staging_size < raw_bytes)
         return -5;
 
     /* Pack the selected crop into a contiguous 14-bit frame for the encoder. */
@@ -340,14 +363,14 @@ int crx_d8_compress_raw_rectangle(
         for (y = 0; y < height; y++)
         {
             const void *s = src8 + (src_y + y) * src_pitch + src_x_bytes;
-            void *d = staging + (uint32_t)y * row_bytes;
+            void *d = crx_staging + (uint32_t)y * row_bytes;
             memcpy(d, s, row_bytes);
         }
     }
 
     memset(&setp, 0, sizeof(setp));
     setp.type = 0;
-    setp.image_addr = (uint32_t)staging;
+    setp.image_addr = (uint32_t)crx_staging;
     setp.x_offset = 0;
     setp.y_offset = 0;
     setp.dup = 0;
