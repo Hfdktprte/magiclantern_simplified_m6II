@@ -25,6 +25,7 @@ jobs:
             binutils-arm-none-eabi \
             libnewlib-arm-none-eabi \
             python3 \
+            python3-docutils \
             zip
 
       - name: Build mlv_lite first
