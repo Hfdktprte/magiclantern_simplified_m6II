@@ -188,7 +188,7 @@ void menu_init( void ) __attribute__((weak,alias("nop")));
 void debug_init( void ) __attribute__((weak,alias("nop")));
 
 static int magic_off = 0; // Set to 1 to disable ML
-static int magic_off_request = 0;
+static volatile int magic_off_request = 0;
 
 int magic_is_off() 
 {
@@ -417,7 +417,12 @@ static void my_big_init_task()
     extern int _set_at_startup;
     _set_at_startup = config_flag_file_setting_load("ML/SETTINGS/REQUIRE.SET");
 
-    // at this point, gui_main_task should be started and should be able to tell whether SET was pressed at startup
+#ifdef CONFIG_M6II
+    /* Allow time for a SET held at power-on to reach the GUI task. */
+    for (int i = 0; i < 24 && !magic_off_request; i++)
+        msleep(50);
+#endif
+
     if (magic_off_request != _set_at_startup)
     {
         /* should we bypass loading ML? */

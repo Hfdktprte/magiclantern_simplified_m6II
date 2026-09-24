@@ -49,6 +49,11 @@
 
 void update_lvae_for_autoiso_n_displaygain();
 
+#ifdef CONFIG_M6II
+CONFIG_INT("movie.custom.ud.iso", movie_custom_updown_iso, 0);
+CONFIG_INT("movie.custom.set.x10", movie_custom_set_x10, 0);
+#endif
+
 #ifdef FEATURE_FORCE_HDMI_VGA
 CONFIG_INT("hdmi.force.vga", hdmi_force_vga, 0);
 
@@ -984,6 +989,54 @@ void movtweak_task_init()
 #endif
 }
 
+#ifdef CONFIG_M6II
+static struct menu_entry m6ii_customize_buttons_menu[] = {
+    {
+        .name = "Customize buttons",
+        .select = menu_open_submenu,
+        .help = "Assign useful controls to the rear buttons in Movie LiveView.",
+        .depends_on = DEP_MOVIE_MODE,
+        .submenu_width = 650,
+        .children = (struct menu_entry[]) {
+            {
+                .name = "UP button",
+                .priv = &movie_custom_updown_iso,
+                .max = 1,
+                .choices = CHOICES("Off", "ISO"),
+                .icon_type = IT_DICE_OFF,
+                .help = "Use UP to increase ISO by one stop.",
+                .depends_on = DEP_MOVIE_MODE,
+            },
+            {
+                .name = "SET button",
+                .priv = &movie_custom_set_x10,
+                .max = 1,
+                .choices = CHOICES("Off", "x10 zoom"),
+                .icon_type = IT_DICE_OFF,
+                .help = "Use SET to toggle LiveView between 1x and 10x zoom.",
+                .depends_on = DEP_MOVIE_MODE,
+            },
+            MENU_EOL,
+        },
+    },
+};
+
+static void m6ii_customize_buttons_menu_task(void *unused)
+{
+    /* Keep this submenu at the end after modules register Movie entries. */
+    msleep(1500);
+    menu_add("Movie", m6ii_customize_buttons_menu,
+             COUNT(m6ii_customize_buttons_menu));
+
+    for (int i = 0; i < 20; i++)
+    {
+        if (!gui_menu_shown())
+            menu_move_entry_to_end("Movie", "Customize buttons");
+        msleep(500);
+    }
+}
+#endif
+
 static struct menu_entry mov_menus[] = {
     #ifdef FEATURE_MOVIE_RECORDING_50D
     {
@@ -1074,6 +1127,7 @@ static struct menu_entry mov_menus[] = {
         },
     },
     #endif
+
 };
 
 // Only create this menu if the cam has any feature that needs it
@@ -1179,6 +1233,10 @@ struct menu_entry expo_override_menus[] = {
 static void movtweak_init()
 {
     menu_add("Movie", mov_menus, COUNT(mov_menus));
+    #ifdef CONFIG_M6II
+    task_create("m6ii_btn_menu", 0x1a, 0x1000,
+                m6ii_customize_buttons_menu_task, 0);
+    #endif
     #ifdef FEATURE_EXPO_OVERRIDE
     bv_sem = create_named_semaphore("bv", SEM_CREATE_UNLOCKED);
     #endif

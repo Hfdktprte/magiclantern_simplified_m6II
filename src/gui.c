@@ -63,12 +63,97 @@
 
 struct semaphore * gui_sem;
 
+#ifdef CONFIG_M6II
+extern int movie_custom_updown_iso;
+extern int movie_custom_set_x10;
+extern int is_round_iso(int iso);
+extern int GUI_GetLvDispSizeValue(void);
+extern void GUI_SetLvDispSizeValue(int zoom);
+
+void m6ii_movie_iso_step(int sign)
+{
+    /* Full-stop movie ISO sequence: 100 through 6400. */
+    static const uint8_t m6ii_movie_iso_raw[] = {
+        72, 80, 88, 96, 104, 112, 120
+    };
+
+    int current_raw = lens_info.raw_iso;
+
+    if (!current_raw)
+        return; /* leave Auto ISO untouched */
+
+    if (sign > 0)
+    {
+        for (unsigned i = 0; i < COUNT(m6ii_movie_iso_raw); i++)
+        {
+            if (m6ii_movie_iso_raw[i] > current_raw)
+            {
+                m6ii_lens_set_rawiso_native(m6ii_movie_iso_raw[i]);
+                return;
+            }
+        }
+    }
+    else
+    {
+        for (int i = COUNT(m6ii_movie_iso_raw) - 1; i >= 0; i--)
+        {
+            if (m6ii_movie_iso_raw[i] < current_raw)
+            {
+                m6ii_lens_set_rawiso_native(m6ii_movie_iso_raw[i]);
+                return;
+            }
+        }
+    }
+}
+
+static int handle_m6ii_movie_buttons_direct(struct event *event)
+{
+    /* M6 II movie shortcuts: UP raises ISO; SET toggles 1x/10x zoom. */
+    if (!lv || gui_menu_shown())
+        return 1;
+
+    if (movie_custom_updown_iso)
+    {
+        if (event->param == 0x3F)
+        {
+            m6ii_movie_iso_step(+1);
+            return 0;
+        }
+
+        if (event->param == 0x40)
+            return 0;
+
+    }
+
+    if (movie_custom_set_x10)
+    {
+        if (event->param == 0x0A)
+        {
+            int zoom = GUI_GetLvDispSizeValue();
+            GUI_SetLvDispSizeValue(zoom == 10 ? 1 : 10);
+            return 0;
+        }
+
+        if (event->param == 0x0B)
+            return 0;
+    }
+
+    return 1;
+}
+#endif
+
 // return 0 if you want to block this event
 static int handle_buttons(struct event * event)
 {
     ASSERT(event->type == 0)
 
     if (event->type != 0) return 1; // only handle events with type=0 (buttons)
+
+#ifdef CONFIG_M6II
+    if (handle_m6ii_movie_buttons_direct(event) == 0)
+        return 0;
+#endif
+
     if (handle_common_events_startup(event) == 0) return 0;
     extern int ml_started;
     if (!ml_started) return 1;
@@ -113,6 +198,10 @@ void ml_gui_main_task()
 
     gui_init_end(); // no params?
 
+#ifdef CONFIG_M6II
+    uint32_t m6ii_gui_start_ms = get_ms_clock();
+#endif
+
     while(1)
     {
         #if defined(CONFIG_550D) || defined(CONFIG_7D)
@@ -132,6 +221,19 @@ void ml_gui_main_task()
         if (event == NULL) {
             continue;
         }
+
+#ifdef CONFIG_M6II
+        /* Keep the startup SET bypass ahead of custom movie shortcuts. */
+        if (event->type == 0 &&
+            (event->param == BGMT_PRESS_SET ||
+             event->param == BGMT_UNPRESS_SET) &&
+            event->arg != FAKE_BTN &&
+            get_ms_clock() - m6ii_gui_start_ms < 5000)
+        {
+            _disable_ml_startup();
+            continue;
+        }
+#endif
 
         index = event->type;
 
