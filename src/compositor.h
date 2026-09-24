@@ -6,6 +6,17 @@
 
 int compositor_layer_setup();
 
+/*
+ * Optional full-screen YUV preview layer.
+ *
+ * These entry points are always available so camera-independent modules can
+ * call them. On unsupported platforms they are harmless no-ops.
+ */
+int compositor_preview_layer_setup(void);
+void *compositor_preview_buffer(void);
+int compositor_preview_set_enabled(int enabled);
+void compositor_preview_refresh(void);
+
 /**
  * Really D8, DX -> 6, D7 -> 8, D6 -> either 7 or 8 depending on Zico fw.
  *
@@ -55,6 +66,8 @@ int compositor_layer_setup();
  * See https://www.magiclantern.fm/forum/index.php?topic=26024 for more details.
  */
 #define XIMR_FLAGS_LAYER_RGBA 0x5040100
+/* Full-frame YUV422 layer, without alpha. Used by the M6 II RAW framing preview. */
+#define XIMR_FLAGS_LAYER_YUV  0x04020100
 
 // This shouldn't change, but...
 #ifndef CANON_GUI_LAYER_ID

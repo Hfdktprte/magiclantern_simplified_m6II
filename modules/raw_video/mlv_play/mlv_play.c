@@ -264,7 +264,8 @@ static void mlv_play_show_dlg(uint32_t duration, char *string)
     {
         icon = bmp_load_ram((uint8_t *)LDVAR(video_bmp), LDLEN(video_bmp), 0);
         
-        bmp_fill(COLOR_BG, pos_x, pos_y, width, height);
+        bmp_fill(is_camera("M6II", "1.1.1") ? COLOR_BLACK : COLOR_BG,
+                 pos_x, pos_y, width, height);
         
         /* redraw 4 times in case it gets overdrawn */
         for(int loop = 0; loop < 4; loop++)
@@ -645,6 +646,7 @@ static uint32_t mlv_play_osd_draw()
     uint32_t redraw = 0;
     uint32_t border = 4;
     uint32_t y_offset = 28;
+    uint8_t osd_bg = is_camera("M6II", "1.1.1") ? COLOR_BLACK : COLOR_BG;
 
     /* undraw last drawn OSD item */
     static char osd_line[64] = "";
@@ -718,8 +720,8 @@ static uint32_t mlv_play_osd_draw()
     }
     
     w = bmp_string_width(FONT_LARGE, osd_line);
-    bmp_fill(COLOR_BG, mlv_play_osd_x - w/2 - border, mlv_play_osd_y - border, w + 2 * border, h + 2 * border);
-    bmp_printf(FONT(FONT_LARGE,COLOR_WHITE,COLOR_BG), mlv_play_osd_x - w/2, mlv_play_osd_y, osd_line);
+    bmp_fill(osd_bg, mlv_play_osd_x - w/2 - border, mlv_play_osd_y - border, w + 2 * border, h + 2 * border);
+    bmp_printf(FONT(FONT_LARGE,COLOR_WHITE,osd_bg), mlv_play_osd_x - w/2, mlv_play_osd_y, osd_line);
     
     /* draw selected item over with blue background */
     bmp_printf(FONT(FONT_LARGE,COLOR_WHITE,COLOR_BLUE), mlv_play_osd_x - w/2 + selected_x, mlv_play_osd_y, "  %s  ", selected_item);
@@ -746,7 +748,16 @@ static void mlv_play_osd_task(void *priv)
 {
     uint32_t next_render_time = get_ms_clock() + mlv_play_render_timestep;
  
-    mlv_play_osd_state = MLV_PLAY_MENU_IDLE;
+    if (is_camera("M6II", "1.1.1"))
+    {
+        /* Keep playback controls visible on M6 II. */
+        mlv_play_osd_state = MLV_PLAY_MENU_FADEIN;
+        mlv_play_osd_y = os.y_max + 1;
+    }
+    else
+    {
+        mlv_play_osd_state = MLV_PLAY_MENU_IDLE;
+    }
     mlv_play_osd_item = 1;
     mlv_play_paused = 0;   
     
@@ -888,7 +899,9 @@ static void mlv_play_osd_task(void *priv)
             {
                 mlv_play_osd_state = MLV_PLAY_MENU_SHOWN;
             }
-            else if(idle_time > mlv_play_osd_idle && mlv_play_osd_state == MLV_PLAY_MENU_SHOWN)
+            else if(!is_camera("M6II", "1.1.1") &&
+                    idle_time > mlv_play_osd_idle &&
+                    mlv_play_osd_state == MLV_PLAY_MENU_SHOWN)
             {
                 mlv_play_osd_state = MLV_PLAY_MENU_FADEOUT;
             }
@@ -1445,6 +1458,220 @@ static void check_dup_frame(frame_buf_t *buffer)
     }
 }
 
+static uint16_t m6ii_mlv_play_get_pixel(const uint8_t *src, int pitch, int x, int y, int bpp)
+{
+    const uint8_t *row = src + y * pitch;
+    int src_pos = x * bpp / 16;
+    int bits_left = (bpp * x - 16 * src_pos) % 16;
+    int shift_right = 16 - bpp - bits_left;
+    int byte_pos = src_pos * 2;
+
+    uint32_t value = row[byte_pos] | ((uint32_t) row[byte_pos + 1] << 8);
+
+    if (shift_right >= 0)
+    {
+        value >>= shift_right;
+    }
+    else
+    {
+        uint32_t value2 = row[byte_pos + 2] | ((uint32_t) row[byte_pos + 3] << 8);
+        value <<= -shift_right;
+        value |= value2 >> (16 + shift_right);
+    }
+
+    return value & ((1u << bpp) - 1);
+}
+
+static void m6ii_mlv_play_render_frame(frame_buf_t *buffer)
+{
+    uint8_t *bvram = bmp_vram();
+    if (!bvram || !buffer->frameBufferAligned || !buffer->xRes || !buffer->yRes)
+        return;
+
+    int bpp = buffer->bitDepth;
+    if (bpp != 10 && bpp != 12 && bpp != 14 && bpp != 16)
+        return;
+
+    int pitch = buffer->xRes * bpp / 8;
+
+    /*
+     * Match Magic Lantern's normal RAW preview transfer functions.
+     *
+     * raw_preview_color_work() uses a 2:1:2 preview white balance:
+     * red/blue are lifted by one stop relative to green, then all channels
+     * get the same EV mapping and "gamma 2" curve. The fast path uses the
+     * green curve only.
+     */
+    static uint8_t gamma_rb[1024];
+    static uint8_t gamma_g[1024];
+    static int gamma_black = -1;
+    static int gamma_white = -1;
+    static int gamma_bpp = -1;
+    static int gamma_div = 0;
+
+    int black = buffer->blackLevel;
+    int white = buffer->whiteLevel;
+
+    if (bpp == 16)
+    {
+        black >>= 2;
+        white >>= 2;
+    }
+
+    black = COERCE(black, 0, 16383);
+    white = COERCE(white, black + 1, 16383);
+
+    if (gamma_black != black || gamma_white != white || gamma_bpp != bpp)
+    {
+        gamma_div = 0;
+        while (((white - black) >> gamma_div) >= 1024)
+            gamma_div++;
+
+        /*
+         * raw_to_ev() uses raw_info's black/white levels. Temporarily point
+         * those at the normalized levels used by this fallback renderer so
+         * 10/12/14/16-bit inputs all use the same ML preview curve.
+         */
+        int saved_black = raw_info.black_level;
+        int saved_white = raw_info.white_level;
+        raw_info.black_level = black;
+        raw_info.white_level = white;
+
+        for (int i = 0; i < 1024; i++)
+        {
+            int raw = (i << gamma_div) + black;
+
+            int g_rb = COERCE(raw_to_ev(raw) + 11, 0, 10) * 255 / 10;
+            int g_g  = COERCE(raw_to_ev(raw) + 10, 0, 10) * 255 / 10;
+
+            gamma_rb[i] = COERCE(g_rb * g_rb / 255, 0, 255);
+            gamma_g[i]  = COERCE(g_g  * g_g  / 255, 0, 255);
+        }
+
+        raw_info.black_level = saved_black;
+        raw_info.white_level = saved_white;
+
+        gamma_black = black;
+        gamma_white = white;
+        gamma_bpp = bpp;
+    }
+
+    int range = white - black;
+
+    int out_w = 720;
+    int out_h = buffer->yRes * out_w / buffer->xRes;
+
+    if (out_h > 480)
+    {
+        out_h = 480;
+        out_w = buffer->xRes * out_h / buffer->yRes;
+    }
+
+    out_w &= ~1;
+    out_h &= ~1;
+
+    int x0 = (720 - out_w) / 2;
+    int y0 = (480 - out_h) / 2;
+
+    /*
+     * Keep the whole ML RGBA overlay opaque while playing. This both gives
+     * true black letterbox bars and covers Canon's "No image"/playback GUI.
+     */
+    for (int y = 0; y < 480; y++)
+        memset(bvram + y * BMPPITCH, COLOR_BLACK, 720);
+
+    const uint8_t *src = (const uint8_t *) buffer->frameBufferAligned;
+
+    for (int y = 0; y < out_h; y += 2)
+    {
+        int raw_y = y * buffer->yRes / out_h;
+        uint8_t *dst0 = bvram + (y0 + y) * BMPPITCH + x0;
+        uint8_t *dst1 = dst0 + BMPPITCH;
+
+        for (int x = 0; x < out_w; x += 2)
+        {
+            int raw_x = x * buffer->xRes / out_w;
+            uint8_t pixel;
+
+            if (mlv_play_quality == RAW_PREVIEW_GRAY_ULTRA_FAST)
+            {
+                /*
+                 * Fast mode: one Bayer sample per 2x2 output block.
+                 * Pick a green site for a cheap, stable grayscale preview.
+                 */
+                int sample_x = (raw_x & ~1) | ((raw_y & 1) ? 0 : 1);
+                sample_x = MIN(sample_x, buffer->xRes - 1);
+
+                uint32_t value = m6ii_mlv_play_get_pixel(src, pitch, sample_x, raw_y, bpp);
+                if (bpp == 16)
+                    value >>= 2;
+
+                int idx = COERCE((int) value - black, 0, range) >> gamma_div;
+                uint8_t level = gamma_g[MIN(idx, 1023)];
+                pixel = 38 + level * 41 / 255;
+            }
+            else
+            {
+                /*
+                 * Color mode: decode one RG/GB Bayer cell for each 2x2 output
+                 * block. The MLV RAW convention used by this codebase is:
+                 *
+                 *   R G
+                 *   G B
+                 *
+                 * Average the two greens exactly like raw_preview_color_work(),
+                 * then apply ML's 2:1:2 preview WB / EV curves and quantize the
+                 * resulting RGB into the dedicated indexed preview cube.
+                 */
+                int bx = raw_x & ~1;
+                int by = raw_y & ~1;
+
+                bx = MIN(bx, MAX(0, (int) buffer->xRes - 2));
+                by = MIN(by, MAX(0, (int) buffer->yRes - 2));
+
+                uint32_t rv  = m6ii_mlv_play_get_pixel(src, pitch, bx,     by,     bpp);
+                uint32_t gv1 = m6ii_mlv_play_get_pixel(src, pitch, bx + 1, by,     bpp);
+                uint32_t gv2 = m6ii_mlv_play_get_pixel(src, pitch, bx,     by + 1, bpp);
+                uint32_t bv  = m6ii_mlv_play_get_pixel(src, pitch, bx + 1, by + 1, bpp);
+
+                if (bpp == 16)
+                {
+                    rv >>= 2;
+                    gv1 >>= 2;
+                    gv2 >>= 2;
+                    bv >>= 2;
+                }
+
+                int ri  = COERCE((int) rv  - black, 0, range) >> gamma_div;
+                int gi1 = COERCE((int) gv1 - black, 0, range) >> gamma_div;
+                int gi2 = COERCE((int) gv2 - black, 0, range) >> gamma_div;
+                int bi  = COERCE((int) bv  - black, 0, range) >> gamma_div;
+
+                uint8_t r = gamma_rb[MIN(ri, 1023)];
+                uint8_t g1 = gamma_g[MIN(gi1, 1023)];
+                uint8_t g2 = gamma_g[MIN(gi2, 1023)];
+                uint8_t blue = gamma_rb[MIN(bi, 1023)];
+                uint8_t green = ((uint16_t) g1 + g2) >> 1;
+
+                pixel = color_preview_rgb(r, green, blue);
+            }
+
+            dst0[x] = pixel;
+            dst0[x + 1] = pixel;
+            dst1[x] = pixel;
+            dst1[x + 1] = pixel;
+        }
+    }
+
+    /*
+     * The frame renderer and playback controls share this indexed buffer.
+     * Repaint the controls after the frame, not on a timer, so video frames
+     * can never erase the persistent M6 II OSD.
+     */
+    mlv_play_osd_draw();
+    ml_refresh_display_needed = 1;
+}
+
 static void mlv_play_render_frame(frame_buf_t *buffer)
 {
     raw_info.buffer = buffer->frameBufferAligned;
@@ -1455,6 +1682,12 @@ static void mlv_play_render_frame(frame_buf_t *buffer)
 
     /* fixme: read aspect ratio from metadata */
     raw_force_aspect_ratio(1, 1);
+
+    if (is_camera("M6II", "1.1.1"))
+    {
+        m6ii_mlv_play_render_frame(buffer);
+        return;
+    }
     
     if(raw_twk_available())
     {
@@ -1622,7 +1855,10 @@ static void mlv_play_clear_screen()
 {
     /* clear anything */
     vram_clear_lv();
-    clrscr();
+    if (is_camera("M6II", "1.1.1"))
+        bmp_fill(COLOR_BLACK, 0, 0, 720, 480);
+    else
+        clrscr();
     
     /* update OSD */
     msg_queue_post(mlv_play_queue_osd, (uint32_t) 0);
@@ -2551,8 +2787,23 @@ static void mlv_play_leave_playback()
         free(buffer);
     }
     
+    if (is_camera("M6II", "1.1.1"))
+    {
+        /*
+         * Drop the opaque playback frame before leaving Canon PLAY mode and
+         * clear again after the mode switch so no last MLV frame survives
+         * over the restored LiveView.
+         */
+        clrscr();
+        ml_refresh_display_needed = 1;
+    }
     vram_clear_lv();
     exit_play_qr_mode();
+    if (is_camera("M6II", "1.1.1"))
+    {
+        clrscr();
+        ml_refresh_display_needed = 1;
+    }
 }
 
 static void mlv_play_enter_playback()
@@ -2560,6 +2811,16 @@ static void mlv_play_enter_playback()
     /* prepare display */
     NotifyBoxHide();
     enter_play_mode();
+
+    if (is_camera("M6II", "1.1.1"))
+    {
+        /*
+         * Cover Canon PLAY mode immediately. Decoded frames will replace this
+         * black fill on the same ML overlay while leaving Canon underneath.
+         */
+        bmp_fill(COLOR_BLACK, 0, 0, 720, 480);
+        ml_refresh_display_needed = 1;
+    }
     
     /* render task is slave and controlled via these variables */
     mlv_play_render_abort = 0;

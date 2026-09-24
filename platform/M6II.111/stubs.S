@@ -143,6 +143,12 @@ THUMB_FN(0xe05994ce, give_semaphore)
 THUMB_FN(0xe0599454, take_semaphore)
 THUMB_FN(0xe0599424, take_semaphore_now)
 
+THUMB_FN(0xe0598de6, CreateEventFlag_strictly)
+THUMB_FN(0xe0576f3a, DeleteEventFlag)
+THUMB_FN(0xe0577058, WaitForAnyEventFlag)
+THUMB_FN(0xe0577254, SetEventFlag)
+THUMB_FN(0xe0577282, ClearEventFlag)
+
 /** GUI **/
 DATA_PTR(0x11960, gui_task_list)
 THUMB_FN(0xe0557032, SetGUIRequestMode)
@@ -178,6 +184,25 @@ THUMB_FN(0xe0586a00, CreateMemorySuite)
 THUMB_FN(0xe0586046, CreateMemoryChunk)
 // SRM use disabled via CONFIG_MEMORY_SRM_NOT_WORKING
 
+THUMB_FN(0xe0630eb6, PwrMng_WakeSubChips)
+THUMB_FN(0xe0630ee4, PwrMng_SuspendSubChips)
+THUMB_FN(0xe057978a, CreateResLockEntry)
+THUMB_FN(0xe0579972, LockEngineResources)
+THUMB_FN(0xe0579a0c, UnLockEngineResources)
+
+THUMB_FN(0xe057ff40, ConnectReadEDmac_maybe)
+THUMB_FN(0xe057ff78, edmac_reset_channel)
+THUMB_FN(0xe0580062, RegisterEDmacCompleteCBR)
+THUMB_FN(0xe05803fa, UnregisterEDmacCompleteCBR)
+THUMB_FN(0xe058048a, edmac_reset_boomer_vdkick)
+THUMB_FN(0xe0580502, edmac_select_boomer)
+THUMB_FN(0xe0580596, edmac_stop_boomer_maybe)
+THUMB_FN(0xe05805da, edmac_reset_packunpack_mode)
+THUMB_FN(0xe0580782, StartEDmac_maybe)
+THUMB_FN(0xe0580962, edmac_set_address)
+THUMB_FN(0xe058096e, edmac_set_size)
+THUMB_FN(0xe0580e5a, edmac_set_transfer_mode)
+
 /** Uncategorized **/
 DATA_PTR(0x14684, sd_device)
 THUMB_FN(0xe0818adc, _LoadCalendarFromRTC)
@@ -189,6 +214,17 @@ THUMB_FN(0xe0599c42,  dm_set_store_level)
 THUMB_FN(0xe058c8dc, _prop_cleanup)
 THUMB_FN(0xe058c332, prop_register_slave)
 THUMB_FN(0xe058c400, _prop_request_change)
+THUMB_FN(0xe0134dfa, GetRearTemperature)
+THUMB_FN(0xe02df628, GetAudioLevel) // AudioDS raw level getter; returns device-off cleanly
+THUMB_FN(0xe07e0f38, GUI_GetOlcTvForApex)   // ROM: Tv table 0xE1482ED0
+THUMB_FN(0xe07e1174, GUI_GetOlcIsoForApex)  // ROM: ISO table 0xE1483998
+
+/* M6 II 1.1.1 ROM: native LiveView zoom accessors.
+ * GUI_SetLvDispSizeValue validates 1/5/10/0x81/0x85/0x8a and sends the
+ * full 8-byte PROP_LV_DISPSIZE payload while preserving Canon's mode word.
+ */
+THUMB_FN(0xe05722da, GUI_SetLvDispSizeValue)
+THUMB_FN(0xe0572316, GUI_GetLvDispSizeValue)
 
 /**
  * Things needed for CONFIG_COMPOSITOR_XCM / CONFIG_XCM_DEDICATED_LAYER

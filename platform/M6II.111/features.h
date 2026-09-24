@@ -28,7 +28,14 @@
 
 // enable global draw
 #define FEATURE_GLOBAL_DRAW
+#define FEATURE_AUDIO_METERS
+#define FEATURE_ZEBRA
 #define FEATURE_CROPMARKS
+#define FEATURE_HISTOGRAM
+#define FEATURE_RAW_HISTOGRAM
+
+#define CONFIG_RAW_LIVEVIEW
+#define FEATURE_RAW_ZEBRAS
 
 // Enable remapping ROM pages to RAM
 #define CONFIG_SGI_HANDLERS
@@ -53,3 +60,10 @@
 #define CONFIG_AUTOBACKUP_ROM
 
 #undef CONFIG_ADDITIONAL_VERSION
+
+
+/*
+ * ML menu piggybacks Canon's 0xc048 Q dialog in LiveView. Canon times that
+ * dialog out on its own unless ML periodically renews the GUI request.
+ */
+#define CONFIG_MENU_TIMEOUT_FIX

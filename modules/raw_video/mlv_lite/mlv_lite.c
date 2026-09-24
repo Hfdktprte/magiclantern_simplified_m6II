@@ -102,6 +102,7 @@ static int cam_700d = 0;
 static int cam_60d = 0;
 static int cam_100d = 0;
 static int cam_1100d = 0;
+static int cam_m6ii = 0;
 
 static int cam_5d3 = 0;
 static int cam_5d3_113 = 0;
@@ -153,6 +154,7 @@ static CONFIG_INT("raw.dolly", dolly_mode, 0);
 #define FRAMING_PANNING (dolly_mode == 1)
 
 static CONFIG_INT("raw.preview", preview_mode, 0);
+static CONFIG_INT("raw.kill.gd", kill_gd, 0);
 #define PREVIEW_AUTO   (preview_mode == 0)
 #define PREVIEW_CANON  (preview_mode == 1)
 #define PREVIEW_ML     (preview_mode == 2)
@@ -306,6 +308,11 @@ static volatile int raw_recording_state = RAW_IDLE;
 #define RAW_IS_RECORDING (raw_recording_state == RAW_RECORDING || \
                           raw_recording_state == RAW_PRE_RECORDING)
 #define RAW_IS_FINISHING (raw_recording_state == RAW_FINISHING)
+
+int mlv_lite_raw_recording_state()
+{
+    return raw_recording_state;
+}
 
 #define VIDF_HDR_SIZE 64
 
@@ -945,10 +952,23 @@ void setup_bit_depth_digital_gain(int force_off)
 
 /* called when starting to record */
 static REQUIRES(settings_sem)
-void setup_bit_depth()
+int setup_bit_depth()
 {
-    raw_lv_request_bpp(BPP);
+    int requested_bpp = BPP;
+
+    raw_lv_request_bpp(requested_bpp);
+
+    /* Keep MLV geometry in sync with the active RAW writer. */
+    if (raw_info.bits_per_pixel != requested_bpp)
+    {
+        raw_lv_request_bpp(14);
+        output_format = OUTPUT_14BIT_NATIVE;
+        setup_bit_depth_digital_gain(1);
+        return 0;
+    }
+
     setup_bit_depth_digital_gain(0);
+    return 1;
 }
 
 /* called when recording ends, or when raw video is turned off */
@@ -2065,6 +2085,12 @@ unsigned int raw_rec_polling_cbr(unsigned int unused)
         return 0;
     }
 
+    /* reallocate if no buffer is allocated while idle. This happens on M50 after stopping recording ("No memory suites" keeps screaming) */
+    if (!shoot_mem_suite && !srm_mem_suite && (RAW_IS_IDLE || RAW_IS_PREPARING))
+    {
+        realloc = 1;
+    }
+
     /* reallocate buffers if needed (only if not recording) */
     if (realloc && (RAW_IS_IDLE || RAW_IS_PREPARING) && gui_state == GUISTATE_IDLE)
     {
@@ -2153,6 +2179,19 @@ void FAST hack_liveview_vsync()
 static REQUIRES(RawRecTask)
 void hack_liveview(int unhack)
 {
+    if (kill_gd)
+    {
+        if (!unhack)
+        {
+            idle_globaldraw_dis();
+            clrscr();
+        }
+        else
+        {
+            idle_globaldraw_en();
+        }
+    }
+
     if (small_hacks)
     {
         /* disable canon graphics (gains a little speed) */
@@ -3372,6 +3411,13 @@ void raw_video_rec_task(uint32_t card_index)
         raw_recording_state = RAW_PREPARING;
         give_semaphore(settings_sem);
 
+#ifdef CONFIG_M6II
+        /* Clear idle monitoring overlays before RAW recording takes ownership. */
+        BMP_LOCK(clrscr();)
+        rgba_buffer_clear();
+        refresh_yuv_from_rgb();
+#endif
+
         mlv_rec_call_cbr(MLV_REC_EVENT_PREPARING, NULL);
 
         /* globals - updated by vsync hook */
@@ -3427,8 +3473,14 @@ void raw_video_rec_task(uint32_t card_index)
         take_semaphore(settings_sem, 0);
         update_resolution_params();
         setup_buffers();
-        setup_bit_depth();
+        int bit_depth_ok = setup_bit_depth();
         give_semaphore(settings_sem);
+
+        if (!bit_depth_ok)
+        {
+            NotifyBox(5000, "RAW bit depth unavailable");
+            goto cleanup;
+        }
 
         /* create output file */
         raw_movie_filename = get_next_raw_movie_file_name();
@@ -3956,8 +4008,12 @@ cleanup:
         }
 
         ResumeLiveView();
-        redraw();
         raw_recording_state = RAW_IDLE;
+
+        /* Clear the MLV status overlay before returning to idle. */
+        BMP_LOCK(clrscr();)
+        redraw();
+
         mlv_rec_call_cbr(MLV_REC_EVENT_STOPPED, NULL);
     }
 }
@@ -4070,6 +4126,14 @@ static struct menu_entry raw_video_menu[] =
                          "Slow (not real-time) and low-resolution, but has correct framing.\n"
                          "Freeze LiveView for more speed; uses 'Framing' preview if Global Draw ON.\n",
                 .depends_on = DEP_GLOBAL_DRAW,
+            },
+            {
+                .name = "Kill global draw",
+                .priv = &kill_gd,
+                .max = 1,
+                .choices = CHOICES("OFF", "ON"),
+                .help = "Disable global draw while recording.",
+                .help2 = "May help with performance. Some previews depend on GD.",
             },
             {
                 .name    = "Pre-record",
@@ -4201,7 +4265,7 @@ unsigned int raw_rec_keypress_cbr(unsigned int key)
     
     /* ... or SET on 5D2/50D */
     if (cam_50d || cam_5d2) rec_key_pressed = (key == MODULE_KEY_PRESS_SET);
-    
+
     if (rec_key_pressed)
     {
         printf("REC key pressed.\n");
@@ -4397,6 +4461,14 @@ static int raw_rec_should_preview(void)
 
     if (PREVIEW_AUTO)
     {
+        /*
+         * M6 II: Canon LiveView does not describe the cropped MLV frame
+         * reliably.  Use ML's RAW framing preview by default so the LCD
+         * matches the selected res_x/res_y recording window and FOV.
+         * Keep the long half-shutter override for quick access to Canon LV.
+         */
+        if (cam_m6ii) return !long_halfshutter_press;
+
         /* half-shutter overrides default choice */
         if (preview_broken) return 1;
         return prefer_framing_preview ^ long_halfshutter_press;
@@ -4482,6 +4554,163 @@ unsigned int raw_rec_update_preview(unsigned int ctx)
     return 1;
 }
 
+/* Render the M6 II RAW framing preview through a dedicated compositor layer. */
+static volatile int m6ii_preview_task_running = 0;
+
+#define M6II_PREVIEW_WIDTH      736
+#define M6II_PREVIEW_HEIGHT     480
+#define M6II_PREVIEW_YUV_PITCH  (M6II_PREVIEW_WIDTH * 2)
+
+static uint8_t *m6ii_preview_yuv = NULL;
+
+/*
+ * raw_preview_fast_ex() produces UYVY; convert it to the compositor's
+ * 0xAARRGGBB RGBA format.
+ */
+static inline uint32_t m6ii_preview_yuv_to_rgba_pixel(int y, int u, int v)
+{
+#ifdef CONFIG_REC709
+    int r = y + ((1608 * v) >> 10);
+    int g = y - ((191 * u) >> 10) - ((478 * v) >> 10);
+    int b = y + ((1900 * u) >> 10);
+#else
+    int r = y + ((1437 * v) >> 10);
+    int g = y - ((352 * u) >> 10) - ((731 * v) >> 10);
+    int b = y + ((1812 * u) >> 10);
+#endif
+
+    r = COERCE(r, 0, 255);
+    g = COERCE(g, 0, 255);
+    b = COERCE(b, 0, 255);
+
+    return 0xff000000 | (r << 16) | (g << 8) | b;
+}
+
+static void m6ii_preview_uyvy_to_rgba(void *rgba_buffer)
+{
+    uint8_t *src = (uint8_t *)CACHEABLE(m6ii_preview_yuv);
+    uint32_t *dst = (uint32_t *)CACHEABLE(rgba_buffer);
+
+    for (int y = 0; y < M6II_PREVIEW_HEIGHT; y++)
+    {
+        uint8_t *s = src + y * M6II_PREVIEW_YUV_PITCH;
+        uint32_t *d = dst + y * M6II_PREVIEW_WIDTH;
+
+        for (int x = 0; x < M6II_PREVIEW_WIDTH; x += 2)
+        {
+            /*
+             * Digic 6/7/8 UYVY_PACK stores chroma biased by +0x80:
+             *   byte 0: U+128, byte 1: Y0, byte 2: V+128, byte 3: Y1.
+             */
+            int u = (int)s[0] - 128;
+            int y0 = s[1];
+            int v = (int)s[2] - 128;
+            int y1 = s[3];
+
+            d[0] = m6ii_preview_yuv_to_rgba_pixel(y0, u, v);
+            d[1] = m6ii_preview_yuv_to_rgba_pixel(y1, u, v);
+
+            s += 4;
+            d += 2;
+        }
+    }
+}
+
+static void m6ii_raw_preview_task(void *unused)
+{
+    (void) unused;
+
+    int layer_enabled = 0;
+    int fi = 0;
+
+    while (m6ii_preview_task_running)
+    {
+        int want_preview =
+            cam_m6ii &&
+            compress_mq &&
+            m6ii_preview_yuv &&
+            gui_state != GUISTATE_PLAYMENU &&
+            raw_rec_should_preview() &&
+            lv &&
+            is_movie_mode() &&
+            raw_info.buffer &&
+            raw_info.bits_per_pixel == 14 &&
+            vram_lv.width == M6II_PREVIEW_WIDTH &&
+            vram_lv.height == M6II_PREVIEW_HEIGHT &&
+            vram_lv.pitch == M6II_PREVIEW_YUV_PITCH &&
+            res_x > 0 &&
+            res_y > 0;
+
+        void *dst = want_preview ? compositor_preview_buffer() : NULL;
+
+        if (want_preview && dst)
+        {
+            int rendered = 0;
+
+            take_semaphore(settings_sem, 0);
+
+            /* Re-check state after taking the settings lock. */
+            if (raw_info.buffer &&
+                raw_info.bits_per_pixel == 14 &&
+                res_x > 0 &&
+                res_y > 0)
+            {
+                raw_set_preview_rect(skip_x, skip_y, res_x, res_y, 1);
+                raw_force_aspect_ratio(0, 0);
+
+                fi = !fi;
+                void *src =
+                    (RAW_IS_RECORDING && fullsize_buffers[fi])
+                        ? fullsize_buffers[fi]
+                        : (void *)-1;
+
+                raw_preview_fast_ex(
+                    src,
+                    m6ii_preview_yuv,
+                    -1,
+                    -1,
+                    RAW_IS_RECORDING
+                        ? RAW_PREVIEW_GRAY_ULTRA_FAST
+                        : RAW_PREVIEW_COLOR_HALFRES
+                );
+
+                m6ii_preview_uyvy_to_rgba(dst);
+                rendered = 1;
+            }
+
+            give_semaphore(settings_sem);
+
+            /*
+             * Enable only after the first complete frame is rendered, so an
+             * uninitialized opaque YUV surface never flashes on screen.
+             */
+            if (rendered)
+            {
+                if (!layer_enabled)
+                {
+                    if (compositor_preview_set_enabled(1) == 0)
+                        layer_enabled = 1;
+                }
+
+                if (layer_enabled)
+                    compositor_preview_refresh();
+            }
+        }
+        else if (layer_enabled)
+        {
+            compositor_preview_set_enabled(0);
+            layer_enabled = 0;
+            raw_set_dirty();
+        }
+
+        /* Match the compositor refresh ceiling while keeping recording load low. */
+        msleep(RAW_IS_RECORDING ? 100 : 50);
+    }
+
+    if (layer_enabled)
+        compositor_preview_set_enabled(0);
+}
+
 static struct lvinfo_item info_items[] = {
     /* Top bar */
     {
@@ -4510,6 +4739,7 @@ static unsigned int raw_rec_init()
     cam_100d  = is_camera("100D", "1.0.1");
     cam_500d  = is_camera("500D", "1.1.1");
     cam_1100d = is_camera("1100D", "1.0.5");
+    cam_m6ii  = is_camera("M6II", "1.1.1");
 
     cam_5d3_113 = is_camera("5D3",  "1.1.3");
     cam_5d3_123 = is_camera("5D3",  "1.2.3");
@@ -4552,8 +4782,9 @@ static unsigned int raw_rec_init()
     { // so far, only Digic 5 has working lossless compression, hide on other cams
         if (raw_video_menu->children[2].max > 2)
         {
-            raw_video_menu->children[2].max = 2; // hide lossless options, which are 3, 4, 5
-            output_format = 0; // plain 14-bit, no lossless support on D4, D678 (yet)
+            raw_video_menu->children[2].max = 2; // hide lossless options, keep 14/12/10-bit uncompressed
+            if (output_format > 2)
+                output_format = 0;
         }
     }
 
@@ -4591,11 +4822,32 @@ static unsigned int raw_rec_init()
 
     ASSERT(((uint32_t)task_create("compress_task", 0x0F, 0x1000, compress_task, (void*)0) & 1) == 0);
 
+    if (cam_m6ii)
+    {
+        m6ii_preview_yuv = malloc(
+            M6II_PREVIEW_YUV_PITCH * M6II_PREVIEW_HEIGHT
+        );
+
+        if (m6ii_preview_yuv)
+        {
+            m6ii_preview_task_running = 1;
+            task_create("m6ii_raw_preview", 0x1e, 0x4000,
+                        m6ii_raw_preview_task, NULL);
+        }
+        else
+        {
+            DryosDebugMsg(0, 15, "M6II RAW preview: scratch allocation failed");
+        }
+    }
+
     return 0;
 }
 
 static unsigned int raw_rec_deinit()
 {
+    m6ii_preview_task_running = 0;
+    if (cam_m6ii)
+        compositor_preview_set_enabled(0);
     return 0;
 }
 
@@ -4624,6 +4876,7 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(card_spanning)
     MODULE_CONFIG(dolly_mode)
     MODULE_CONFIG(preview_mode)
+    MODULE_CONFIG(kill_gd)
     MODULE_CONFIG(use_srm_memory)
     MODULE_CONFIG(small_hacks)
     MODULE_CONFIG(warm_up)

@@ -1,0 +1,59 @@
+name: Build M6 II
+
+on:
+  push:
+    branches:
+      - M6II-MLV-Framing-Preview
+      - fix/m6ii-live-exposure-metadata
+      - LLM-Experiments-Only
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        timeout-minutes: 6
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo timeout 120s apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::ForceIPv4=true
+          sudo timeout 240s apt-get install -y --no-install-recommends \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::ForceIPv4=true \
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi libnewlib-dev \
+            make gcc g++ python3 python3-docutils zip
+
+      - name: Build M6 II 1.1.1
+        run: |
+          make -C platform/M6II.111 FATAL_WARNINGS=n
+
+      - name: Collect build
+        if: always()
+        run: |
+          mkdir -p artifacts
+          if [ -f platform/M6II.111/build/magiclantern.zip ]; then
+            cp platform/M6II.111/build/magiclantern.zip artifacts/M6II.111-magiclantern.zip
+          fi
+          if [ -f platform/M6II.111/build/autoexec.bin ]; then
+            cp platform/M6II.111/build/autoexec.bin artifacts/autoexec.bin
+          fi
+          find modules -path '*/build/*.mo' -type f -print -exec cp {} artifacts/ \; || true
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: M6II-MLV-Framing-Preview
+          path: artifacts/
+          if-no-files-found: warn

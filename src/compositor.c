@@ -47,6 +47,10 @@ extern uint32_t  display_refresh_needed;
 int _rgb_vram_layer_id = CANON_GUI_LAYER_ID;
 struct MARV * pNewLayer;
 
+/* M6 II RAW framing preview layer, below the regular ML overlay. */
+static struct MARV *pPreviewLayer = NULL;
+static int previewLayerID = -1;
+
 /**
  * Not sure if sync_caches() call is needed. It was when I was drawing
  * over Canon buffers, but now when we have our own may be unnecessary.
@@ -96,6 +100,8 @@ struct MARV *_compositor_create_layer(uint32_t bmp_w, uint32_t bmp_h)
     return pNewLayer;
 }
 
+/* RAW preview uses the same RGBA MARV format as the ML overlay layer. */
+
 #ifdef CONFIG_COMPOSITOR_XCM
 /**
  * Implementation specific to models with Ximr Context Maker (XCM)
@@ -140,6 +146,75 @@ extern uint32_t XCM_SetSourceSurface(void * pXCM, uint layer, struct MARV * pMAR
 extern uint32_t XCM_SetSourceArea(void * pXCM, uint layer, uint16_t srcX, uint16_t srcY, uint16_t srcW, uint16_t srcH);
 extern uint32_t XOC_SetLayerEnable(int p1, int p2, uint layer, int p4);
 #endif // CONFIG_COMPOSITOR_XCM_V2
+
+int compositor_preview_layer_setup(void)
+{
+#if defined(CONFIG_M6II) && defined(CONFIG_COMPOSITOR_XCM_V2)
+    if (pPreviewLayer != NULL && previewLayerID >= 0)
+        return 0;
+
+    int layer_id = 0;
+    while (layer_id < XIMR_MAX_LAYERS &&
+           XCM_GetSourceSurface(_pXCM, layer_id) != NULL)
+    {
+        layer_id++;
+    }
+
+    if (layer_id >= XIMR_MAX_LAYERS)
+    {
+        DryosDebugMsg(0, 15, "RAW preview: no free XCM layer");
+        return 1;
+    }
+
+    /* M6 II panel buffers are 736 pixels wide; the visible image is 720x480. */
+    pPreviewLayer = _compositor_create_layer(736, 480);
+    if (pPreviewLayer == NULL)
+    {
+        DryosDebugMsg(0, 15, "RAW preview: layer allocation failed");
+        return 1;
+    }
+
+    XCM_SetSourceSurface(_pXCM, layer_id, pPreviewLayer);
+    XCM_SetSourceArea(_pXCM, layer_id, 0, 0, 720, 480);
+    XOC_SetLayerEnable(0, 0, layer_id, 0);
+
+    previewLayerID = layer_id;
+    return 0;
+#else
+    return 1;
+#endif
+}
+
+void *compositor_preview_buffer(void)
+{
+#if defined(CONFIG_M6II) && defined(CONFIG_COMPOSITOR_XCM_V2)
+    return pPreviewLayer ? pPreviewLayer->bitmap_data : NULL;
+#else
+    return NULL;
+#endif
+}
+
+int compositor_preview_set_enabled(int enabled)
+{
+#if defined(CONFIG_M6II) && defined(CONFIG_COMPOSITOR_XCM_V2)
+    if (pPreviewLayer == NULL || previewLayerID < 0)
+        return 1;
+
+    XOC_SetLayerEnable(0, 0, previewLayerID, enabled ? 1 : 0);
+    _compositor_force_redraw();
+    return 0;
+#else
+    return 1;
+#endif
+}
+
+void compositor_preview_refresh(void)
+{
+#if defined(CONFIG_M6II) && defined(CONFIG_COMPOSITOR_XCM_V2)
+    if (pPreviewLayer != NULL && previewLayerID >= 0)
+        _compositor_force_redraw();
+#endif
+}
 
 /*
  * CONFIG_COMPOSITOR_XCM_V2 models use a single array of structures, and won't
@@ -232,5 +307,12 @@ int compositor_layer_setup()
 #elif defined(CONFIG_COMPOSITOR_XIMR)
 */
 #endif // CONFIG_COMPOSITOR_XCM
+
+#else
+
+int compositor_preview_layer_setup(void) { return 1; }
+void *compositor_preview_buffer(void) { return NULL; }
+int compositor_preview_set_enabled(int enabled) { (void)enabled; return 1; }
+void compositor_preview_refresh(void) {}
 
 #endif // CONFIG_COMPOSITOR_DEDICATED_LAYER

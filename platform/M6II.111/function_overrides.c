@@ -148,16 +148,6 @@ void AbortEDmac(unsigned int channel)
     return;
 }
 
-void RegisterEDmacCompleteCBR(int channel, void (*cbr)(void*), void* cbr_ctx)
-{
-    return;
-}
-
-void UnregisterEDmacCompleteCBR(int channel)
-{
-    return;
-}
-
 void RegisterEDmacAbortCBR(int channel, void (*cbr)(void*), void* cbr_ctx)
 {
     return;
@@ -185,15 +175,28 @@ void _EngDrvOut(uint32_t reg, uint32_t value)
 
 uint32_t shamem_read(uint32_t addr)
 {
+    if ((addr >> 28) != 0xD)
+        return 0;
+
+    return *(uintptr_t*)addr;
+}
+
+struct memSuite * srm_malloc_suite(int num_requested_buffers)
+{
     return 0;
+}
+
+void srm_free_suite(struct memSuite * suite)
+{
+    return;
+}
+
+void ErrCardForLVApp_handler(void)
+{
+    return;
 }
 
 void _engio_write(uint32_t* reg_list)
 {
     return;
-}
-
-unsigned int UnLockEngineResources(struct LockEntry *lockEntry)
-{
-    return 0;
 }

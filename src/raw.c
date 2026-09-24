@@ -33,6 +33,11 @@
 #include "fps.h"
 #include "platform/state-object.h"
 
+#ifdef CONFIG_EDMAC_RAW_PATCH
+#include "patch.h"
+#undef dbg_printf
+#endif
+
 #undef RAW_DEBUG        /* define it to help with porting */
 #undef RAW_DEBUG_DUMP   /* if you want to save the raw image buffer and the DNG from here */
 #undef RAW_DEBUG_BLACK  /* for checking black level calibration */
@@ -1065,6 +1070,11 @@ int raw_update_params_work()
         skip_right  = zoom ? 0 : 8;
         #endif
 
+        #ifdef CONFIG_M6II
+        skip_top    = 34;
+        skip_left   = 88;
+        #endif
+
         dbg_printf("LV raw buffer: %x (%dx%d)\n", raw_info.buffer, width, height);
         dbg_printf("Skip left:%d right:%d top:%d bottom:%d\n", skip_left, skip_right, skip_top, skip_bottom);
 #endif
@@ -1291,7 +1301,20 @@ int raw_update_params_work()
     raw_info.white_level = get_default_white_level();
     ASSERT(raw_info.bits_per_pixel == 14);
     int black_mean = 0, black_stdev_x100 = 0;
-    int ok = autodetect_black_level(&black_mean, &black_stdev_x100);
+    int ok = 0;
+
+    #ifdef CONFIG_M6II
+    if (lv && is_movie_mode())
+    {
+        black_mean = 2048;
+        black_stdev_x100 = 800;
+        ok = 1;
+    }
+    else
+    #endif
+    {
+        ok = autodetect_black_level(&black_mean, &black_stdev_x100);
+    }
     #ifdef BLACK_LEVEL
     if (ABS(black_mean - BLACK_LEVEL) < 64)
     {
@@ -1370,7 +1393,11 @@ int raw_update_params_work()
          * so we do this by compensating the white level manually
          * warning: this may exceed 16383!
          */
+        #ifdef CONFIG_M6II
+        int shad_gain = 3444;
+        #else
         int shad_gain = shamem_read(SHAD_GAIN_REGISTER);
+        #endif
 
         raw_info.white_level -= raw_info.black_level;
         raw_info.white_level = raw_info.white_level * 3444 / shad_gain; /* 0.25 EV correction, so LiveView matches CR2 exposure */
@@ -1453,11 +1480,13 @@ int raw_update_params()
         ans = raw_update_params_once();
     }
 
+    #ifndef CONFIG_M6II
     if (raw_info.bits_per_pixel != 14)
     {
         /* hack: this will disable all overlays at bit depths other than 14 */
         return 0;
     }
+    #endif
 
     return ans;
 }
@@ -2106,6 +2135,10 @@ static int compute_dynamic_range(int black_mean, int black_stdev_x100, int white
 
 #ifdef CONFIG_RAW_LIVEVIEW
 
+#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+static int m6ii_raw_force_live_pitch(void);
+#endif
+
 static int lv_raw_enabled = 0;
 
 #ifdef CONFIG_EDMAC_RAW_SLURP
@@ -2118,6 +2151,9 @@ void FAST raw_lv_redirect_edmac(void* ptr)
     #ifdef CONFIG_EDMAC_RAW_SLURP
     redirected_raw_buffer = (void*) CACHEABLE(ptr);
     #else
+    #if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    (void)m6ii_raw_force_live_pitch();
+    #endif
     raw_lv_edmac->ram_addr = (uint32_t)CACHEABLE(ptr);
     #endif
 }
@@ -2173,13 +2209,240 @@ int _raw_lv_get_iso_post_gain()
 
 #endif // CONFIG_EDMAC_RAW_SLURP
 
+#ifdef CONFIG_EDMAC_RAW_PATCH
+#if defined(CONFIG_M6II)
+
+#define M6II_RAW_EDMAC_CHANNEL      3u
+#define M6II_DMACINFO_BASE          0xE1008944u
+#define M6II_EDMAC_SET_SIZE_ADDR    0xE058096Eu
+#define M6II_RAW_STATE_BASE         0x00010970u
+#define M6II_RAW_PACKMODE_ADDR      (M6II_RAW_STATE_BASE + 0x74u)
+#define M6II_PACKUNPACK_ID_BASE     0xE1008814u
+#define M6II_PACKUNPACK_INFO_BASE   0xE1008BA4u
+#define M6II_RAW_PACKUNPACK_MMIO    0xD0422200u
+
+static int m6ii_edmac_raw_patch_installed = 0;
+static struct patch m6ii_edmac_raw_patches[1];
+static uint8_t m6ii_edmac_raw_hook_code[8] __attribute__((aligned(4)));
+
+static uint32_t m6ii_raw_packmode_addr(void)
+{
+    if (MEM(M6II_DMACINFO_BASE + M6II_RAW_EDMAC_CHANNEL * 8u) != RAW_LV_EDMAC_CHANNEL_ADDR)
+        return 0;
+
+    uint32_t puid = MEM(M6II_PACKUNPACK_ID_BASE + M6II_RAW_EDMAC_CHANNEL * 4u);
+    if (puid != 2u)
+        return 0;
+
+    if (MEM(M6II_PACKUNPACK_INFO_BASE + puid * 12u) != M6II_RAW_PACKUNPACK_MMIO)
+        return 0;
+
+    uint32_t width = MEM(M6II_RAW_STATE_BASE + 0x10u);
+    uint32_t height = MEM(M6II_RAW_STATE_BASE + 0x14u);
+    uint32_t buffer = MEM(M6II_RAW_STATE_BASE + 0x58u);
+
+    if (width < 640u || width > 10000u ||
+        height < 400u || height > 10000u || !buffer)
+        return 0;
+
+    if (MEM(M6II_RAW_PACKMODE_ADDR) > 2u)
+        return 0;
+
+    return M6II_RAW_PACKMODE_ADDR;
+}
+
+void edmac_raw_adjust_pitch(uint32_t channel, struct edmac_info *edmac_config)
+{
+    if (channel != M6II_RAW_EDMAC_CHANNEL || !edmac_config ||
+        !edmac_config->xb || !edmac_config->yb)
+        return;
+
+    uint32_t width = edmac_config->xb * 8u / 14u;
+    edmac_config->xb = width * raw_info.bits_per_pixel / 8u;
+}
+
+static int m6ii_raw_force_live_pitch(void)
+{
+    if (!m6ii_edmac_raw_patch_installed ||
+        raw_info.bits_per_pixel >= 14 ||
+        raw_info.width <= 0)
+        return 1;
+
+    uint32_t expected_pitch = raw_info.width * raw_info.bits_per_pixel / 8u;
+    uint32_t yb_xb = raw_lv_edmac->yb_xb;
+
+    if ((yb_xb & 0xFFFFu) != expected_pitch)
+    {
+        raw_lv_edmac->yb_xb =
+            (yb_xb & 0xFFFF0000u) | (expected_pitch & 0xFFFFu);
+
+        if ((raw_lv_edmac->yb_xb & 0xFFFFu) != expected_pitch)
+            return 0;
+    }
+
+    return 1;
+}
+
+extern void edmac_set_size(uint32_t channel, struct edmac_info *config);
+
+static int m6ii_raw_apply_writer_pitch(int bpp, uint32_t expected_mode)
+{
+    const uint32_t base = RAW_LV_EDMAC_CHANNEL_ADDR;
+    const uint32_t expected_pitch = raw_info.width * bpp / 8u;
+
+    if ((shamem_read(base + 0x50u) & 0xFFFFu) == expected_pitch &&
+        MEM(M6II_RAW_PACKMODE_ADDR) == expected_mode)
+        return 1;
+
+    struct edmac_info cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    uint32_t ys_xs = shamem_read(base + 0x48u);
+    uint32_t ya_xa = shamem_read(base + 0x4Cu);
+    uint32_t yb_xb = shamem_read(base + 0x50u);
+    uint32_t yn_xn = shamem_read(base + 0x54u);
+
+    cfg.xs = ys_xs & 0xFFFFu;
+    cfg.ys = ys_xs >> 16;
+    cfg.xa = ya_xa & 0xFFFFu;
+    cfg.ya = ya_xa >> 16;
+    cfg.xb = raw_info.width * 14u / 8u;
+    cfg.yb = yb_xb >> 16;
+    cfg.xn = yn_xn & 0xFFFFu;
+    cfg.yn = yn_xn >> 16;
+    cfg.off1s = shamem_read(base + 0x58u);
+    cfg.off2s = shamem_read(base + 0x5Cu);
+    cfg.off1a = shamem_read(base + 0x60u);
+    cfg.off2a = shamem_read(base + 0x64u);
+    cfg.off1b = shamem_read(base + 0x68u);
+    cfg.off2b = shamem_read(base + 0x6Cu);
+    cfg.off3  = shamem_read(base + 0x70u);
+
+    edmac_set_size(M6II_RAW_EDMAC_CHANNEL, &cfg);
+    wait_lv_frames(2);
+
+    if (MEM(M6II_RAW_PACKMODE_ADDR) != expected_mode)
+        return 0;
+
+    uint32_t actual_pitch = shamem_read(base + 0x50u) & 0xFFFFu;
+
+    if (actual_pitch != expected_pitch && bpp < 14)
+    {
+        if (!m6ii_raw_force_live_pitch())
+            return 0;
+
+        actual_pitch = shamem_read(base + 0x50u) & 0xFFFFu;
+    }
+
+    return actual_pitch == expected_pitch;
+}
+
+void __attribute__((noinline,naked,aligned(4)))
+raw_lv_setedmac_hook(void)
+{
+    asm volatile(
+        "push {r0-r11, lr}\n"
+        "sub  sp, #4\n"
+        "mov  r3, %0\n"
+        "blx  r3\n"
+        "add  sp, #4\n"
+        "pop  {r0-r11, lr}\n"
+        "push {r4,r5,r6,r7,r8,r9,r10,r11,lr}\n"
+        "mov  r5, r0\n"
+        "movw r0, #0x8944\n"
+        "movt r0, #0xE100\n"
+        "movw r3, #0x0977\n"
+        "movt r3, #0xE058\n"
+        "bx   r3\n"
+        :
+        : "r"(edmac_raw_adjust_pitch)
+        : "r3"
+    );
+}
+
+static int install_edmac_raw_patch(void)
+{
+    if (m6ii_edmac_raw_patch_installed)
+        return 0;
+
+    uint16_t push_lo   = *(volatile uint16_t *)(M6II_EDMAC_SET_SIZE_ADDR + 0u);
+    uint16_t push_hi   = *(volatile uint16_t *)(M6II_EDMAC_SET_SIZE_ADDR + 2u);
+    uint16_t mov_r5_r0 = *(volatile uint16_t *)(M6II_EDMAC_SET_SIZE_ADDR + 4u);
+    uint16_t ldr_lit   = *(volatile uint16_t *)(M6II_EDMAC_SET_SIZE_ADDR + 6u);
+
+    if (push_lo != 0xE92Du || push_hi != 0x4FF0u || mov_r5_r0 != 0x4605u ||
+        (ldr_lit & 0xF800u) != 0x4800u || (ldr_lit & 0x0700u) != 0)
+        return 1;
+
+    uint32_t ldr_pc = (M6II_EDMAC_SET_SIZE_ADDR + 10u) & ~3u;
+    uint32_t literal_addr = ldr_pc + ((ldr_lit & 0xFFu) << 2);
+
+    if (MEM(literal_addr) != M6II_DMACINFO_BASE)
+        return 1;
+
+    struct function_hook_patch def = {
+        .patch_addr = M6II_EDMAC_SET_SIZE_ADDR,
+        .target_function_addr = (uint32_t)raw_lv_setedmac_hook,
+        .description = "M6II RAW EDMAC pitch"
+    };
+
+    for (uint32_t i = 0; i < 8u; i++)
+        def.orig_content[i] =
+            *(volatile uint8_t *)(M6II_EDMAC_SET_SIZE_ADDR + i);
+
+    memset(m6ii_edmac_raw_patches, 0, sizeof(m6ii_edmac_raw_patches));
+    memset(m6ii_edmac_raw_hook_code, 0, sizeof(m6ii_edmac_raw_hook_code));
+
+    if (convert_f_patch_to_patch(
+            &def,
+            &m6ii_edmac_raw_patches[0],
+            &m6ii_edmac_raw_hook_code[0]) != E_PATCH_OK)
+        return 1;
+
+    if (apply_patches(m6ii_edmac_raw_patches, 1) != E_PATCH_OK)
+        return 1;
+
+    m6ii_edmac_raw_patch_installed = 1;
+    return 0;
+}
+
+static void remove_edmac_raw_patch(void)
+{
+    if (!m6ii_edmac_raw_patch_installed)
+        return;
+
+    unpatch_memory(M6II_EDMAC_SET_SIZE_ADDR);
+    m6ii_edmac_raw_patch_installed = 0;
+}
+
+#else
+
+static int install_edmac_raw_patch(void) { return 1; }
+static void remove_edmac_raw_patch(void) { }
+
+#endif
+#endif
+
 int raw_lv_settings_still_valid()
 {
     /* should be fast enough for vsync calls */
     if (!lv_raw_enabled) return 0;
+
+#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    if (!m6ii_raw_force_live_pitch()) return 0;
+#endif
+
     int w, h;
     if (!raw_lv_get_resolution(&w, &h)) return 0;
+
+#if defined(CONFIG_M6II)
+    if (w != (raw_info.width * raw_info.bits_per_pixel) / 14 ||
+        h != raw_info.height)
+        return 0;
+#else
     if (w != raw_info.width || h != raw_info.height) return 0;
+#endif
+
     return 1;
 }
 #endif // CONFIG_RAW_LIVEVIEW
@@ -2204,6 +2467,23 @@ int raw_lv_settings_still_valid()
 #define QF ((int)(q->f_lo | (q->f_hi << 4)))
 #define QG ((int)(q->g_lo | (q->g_hi << 2)))
 #define QH ((int)(q->h))
+
+/*
+ * Fill a YUV422 region with neutral black.
+ *
+ * On D6/7/8, chroma is stored with a +0x80 bias, so memset(0) produces
+ * strongly tinted pixels rather than black. UYVY_PACK handles both the
+ * biased and legacy representations correctly.
+ */
+static inline void raw_preview_fill_black(void *buffer, int bytes)
+{
+    uint32_t *p = (uint32_t *)buffer;
+    uint32_t black = UYVY_PACK(0, 0, 0, 0);
+    int words = bytes / 4;
+
+    for (int i = 0; i < words; i++)
+        p[i] = black;
+}
 
 static void FAST raw_preview_color_work(void* raw_buffer, void* lv_buffer, int y1, int y2)
 {
@@ -2267,13 +2547,13 @@ static void FAST raw_preview_color_work(void* raw_buffer, void* lv_buffer, int y
         if (yr <= preview_rect_y || yr >= preview_rect_y + preview_rect_h)
         {
             /* out of range, just fill with black */
-            memset(&lv32[LV(0,y)/4], 0, vram_lv.pitch);
+            raw_preview_fill_black(&lv32[LV(0,y)/4], vram_lv.pitch);
             continue;
         }
 
         /* fill left/right borders with black */
-        memset(&lv32[LV(0,y)/4],  0, LV(x1,y) - LV(0,y)/4*4);
-        memset(&lv32[LV(x2,y)/4], 0, LV(0,1) - LV(x2,0)/4*4);
+        raw_preview_fill_black(&lv32[LV(0,y)/4], LV(x1,y) - LV(0,y)/4*4);
+        raw_preview_fill_black(&lv32[LV(x2,y)/4], LV(0,1) - LV(x2,0)/4*4);
 
         struct raw_pixblock * row = (void*)raw + yr * raw_info.pitch;
 
@@ -2381,13 +2661,13 @@ static void FAST raw_preview_fast_work(void* raw_buffer, void* lv_buffer, int y1
         if (yr <= preview_rect_y || yr >= preview_rect_y + preview_rect_h)
         {
             /* out of range, just fill with black */
-            memset(&lv64[LV(0,y)/8], 0, vram_lv.pitch);
+            raw_preview_fill_black(&lv64[LV(0,y)/8], vram_lv.pitch);
             continue;
         }
 
         /* fill left/right borders with black */
-        memset(&lv64[LV(0,y)/8],  0, LV(x1,y) - LV(0,y)/8*8);
-        memset(&lv64[LV(x2,y)/8], 0, LV(0,1) - LV(x2,0)/8*8);
+        raw_preview_fill_black(&lv64[LV(0,y)/8], LV(x1,y) - LV(0,y)/8*8);
+        raw_preview_fill_black(&lv64[LV(x2,y)/8], LV(0,1) - LV(x2,0)/8*8);
 
         struct raw_pixblock * row = (void*)raw + yr * raw_info.pitch;
 
@@ -2398,11 +2678,12 @@ static void FAST raw_preview_fast_work(void* raw_buffer, void* lv_buffer, int y1
             int xr = lv2rx[x];
             struct raw_pixblock * p = row + (xr/8);
             int c = p->a;
-            uint64_t Y = gamma[COERCE(c - black, 0, white-black) >> div];
-            Y = (Y << 8) | (Y << 24) | (Y << 40) | (Y << 56);
+            int Y = gamma[COERCE(c - black, 0, white-black) >> div];
+            uint32_t yuv32 = UYVY_PACK(0, Y, 0, Y);
+            uint64_t yuv64 = yuv32 | ((uint64_t)yuv32 << 32);
             int idx = LV(x,y)/8;
-            lv64[idx] = Y;
-            lv64[idx + vram_lv.pitch/8] = Y;
+            lv64[idx] = yuv64;
+            lv64[idx + vram_lv.pitch/8] = yuv64;
         }
     }
     free(lv2rx);
@@ -2467,6 +2748,9 @@ static void raw_lv_enable()
     //call("lv_set_raw_wp", 0);
 #endif
     call("lv_save_raw", 1);
+#ifdef CONFIG_EDMAC_RAW_PATCH
+    install_edmac_raw_patch();
+#endif
 #endif
 
 #ifdef DEFAULT_RAW_BUFFER
@@ -2509,6 +2793,9 @@ static void raw_lv_disable()
 
 #ifndef CONFIG_EDMAC_RAW_SLURP
     call("lv_save_raw", 0);
+#ifdef CONFIG_EDMAC_RAW_PATCH
+    remove_edmac_raw_patch();
+#endif
 #endif
 
 #ifdef CONFIG_ALLOCATE_RAW_LV_BUFFER
@@ -2609,47 +2896,78 @@ void raw_lv_request_bpp(int bpp)
 {
     take_semaphore(raw_sem, 0);
 
-    /* raw bit depth setup is done from PACK32_MODE register (mask 0x131) */
     #if defined(CONFIG_DIGIC_45)
         const uint32_t PACK32_MODE = 0xC0F08094;
         enum {
-            // SJE I don't see these values getting written on 70D.
-            // Concrete values used are 0x20 and 0x120.  There's a variable value one that I haven't traced.
-            // Similar on 5D3 123, where I see 0x120 and (variable | 0x20).
-            // Possibly this is "highest bit wins" and 0x30 is redundant, equal to 0x20?
             MODE_16BIT = 0x130,
             MODE_14BIT = 0x030,
             MODE_12BIT = 0x010,
             MODE_10BIT = 0x000,
         };
-    #elif defined(CONFIG_200D) | defined(CONFIG_6D2) | defined(CONFIG_7D2)
-    // FIXME currently doesn't do anything for 6D2 or 7D2 since
-    // EngDrvOut() is a nop there.  Some definition of the enum is required to build.
-    // See 200D for a safe filtered EngDrvOut() - which probably should be more
-    // like property_whitelist, more global, with per cam config.
-        const uint32_t PACK32_MODE = 0xd0008094; // plausible from rom, e.g. e0159eee on 200d 1.0.1,
-                                                 // e0228742 on 6D2 1.0.5,
-                                                 // compare 5d3 1.2.3 ff57c7c8
+    #elif defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
         enum {
-            MODE_16BIT = 0x20, // unknown, copying 14 bit for now
-            MODE_14BIT = 0x20, // probably 14-bit, it's the default value
-            MODE_12BIT = 0x10, // current guess for 12 bit - seems to grab good data every other frame...
-            MODE_10BIT =  0x0, // seems to get 10 bit, but like 12, only every other frame is good
-//            MODE_12BIT = 0x8, // possibly 15 bit?  More likely 10 but different number of planes.
-//            MODE_12BIT = 0x10, // 24 bit, two planes?  Or 12 bit, 4 plane?
-//            MODE_12BIT = 0x18, // 12 bit, 4 planes?
-//            MODE_12BIT = 0x200, // possibly 14 bpp bayer?
-//            MODE_12BIT = 0x300, // likely 8 or 16.  Alternates high and low values, could fit bayer or UYUV etc
-//            MODE_12BIT = 0x2000, // possibly 24 bit?
+            MODE_16BIT = 0x2,
+            MODE_14BIT = 0x2,
+            MODE_12BIT = 0x1,
+            MODE_10BIT = 0x0,
+        };
+
+        uint32_t PACK32_MODE = m6ii_raw_packmode_addr();
+
+        if (!PACK32_MODE || (bpp < 14 && !m6ii_edmac_raw_patch_installed))
+        {
+            give_semaphore(raw_sem);
+            return;
+        }
+    #elif defined(CONFIG_200D) | defined(CONFIG_6D2) | defined(CONFIG_7D2)
+        const uint32_t PACK32_MODE = 0xd0008094;
+        enum {
+            MODE_16BIT = 0x20,
+            MODE_14BIT = 0x20,
+            MODE_12BIT = 0x10,
+            MODE_10BIT = 0x0,
         };
     #endif
-    const uint32_t modes[] = { MODE_10BIT, MODE_12BIT, MODE_14BIT, MODE_16BIT};
 
-    int bpp_index = COERCE((bpp-10)/2, 0, COUNT(modes));
+    const uint32_t modes[] = {
+        MODE_10BIT, MODE_12BIT, MODE_14BIT, MODE_16BIT
+    };
 
+    int bpp_index = COERCE((bpp - 10) / 2, 0, COUNT(modes));
+
+#if defined(CONFIG_M6II) && defined(CONFIG_EDMAC_RAW_PATCH)
+    if (MEM(PACK32_MODE) != modes[bpp_index])
+    {
+        MEM(PACK32_MODE) = modes[bpp_index];
+
+        if (MEM(PACK32_MODE) != (uint32_t)modes[bpp_index])
+        {
+            give_semaphore(raw_sem);
+            return;
+        }
+    }
+
+    raw_info.bits_per_pixel = bpp;
+    raw_info.pitch = raw_info.width * bpp / 8;
+    raw_info.frame_size = raw_info.pitch * raw_info.height;
+
+    if (!m6ii_raw_apply_writer_pitch(bpp, (uint32_t)modes[bpp_index]))
+    {
+        if (bpp < 14)
+        {
+            MEM(PACK32_MODE) = MODE_14BIT;
+            raw_info.bits_per_pixel = 14;
+            raw_info.pitch = raw_info.width * 14 / 8;
+            raw_info.frame_size = raw_info.pitch * raw_info.height;
+            (void)m6ii_raw_apply_writer_pitch(14, MODE_14BIT);
+        }
+
+        give_semaphore(raw_sem);
+        return;
+    }
+#else
     if (shamem_read(PACK32_MODE) == modes[bpp_index])
     {
-        /* no change needed */
         ASSERT(raw_info.bits_per_pixel == bpp);
     }
     else
@@ -2658,9 +2976,9 @@ void raw_lv_request_bpp(int bpp)
         raw_info.bits_per_pixel = bpp;
         raw_info.pitch = raw_info.width * raw_info.bits_per_pixel / 8;
         raw_info.frame_size = raw_info.pitch * raw_info.height;
-        /* fixme: after switching bit depth, EDMAC needs 1-2 frames to settle */
         wait_lv_frames(2);
     }
+#endif
 
     give_semaphore(raw_sem);
 }
@@ -2777,8 +3095,14 @@ int can_use_raw_overlays()
 #ifdef CONFIG_RAW_LIVEVIEW
     if (lv && raw_lv_is_enabled())
     {
+        #ifdef CONFIG_M6II
+        return raw_info.bits_per_pixel == 10 ||
+               raw_info.bits_per_pixel == 12 ||
+               raw_info.bits_per_pixel == 14;
+        #else
         /* currently, raw overlays only work with 14 bits per pixel */
         return raw_info.bits_per_pixel == 14;
+        #endif
     }
 #endif
 
@@ -2791,8 +3115,13 @@ int can_use_raw_overlays_menu()
     if (is_movie_mode())
     {
         /* in movie mode, raw overlays don't make much sense for H.264 video, so only show them for raw video */
+        #ifdef CONFIG_M6II
+        if (lv)
+            return 1;
+        #else
         if (lv && raw_lv_is_enabled())
             return 1;
+        #endif
     }
     else
 #endif

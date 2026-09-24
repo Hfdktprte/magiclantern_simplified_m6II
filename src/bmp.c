@@ -115,6 +115,30 @@ TASK_CREATE( "redraw_task", refresh_yuv_from_rgb_task, 0, 0x1e, 0x1000 );
 // SJE should this global live in bmp.c?
 uint32_t ml_refresh_display_needed = 0;
 
+/*
+ * FEATURE_VRAM_RGBA cameras render ML into an indexed staging buffer, then a
+ * background task converts that buffer to the compositor's RGBA surface.
+ * Full-screen menu redraws must be presented atomically: otherwise the
+ * conversion task may snapshot the indexed buffer while icons/text are only
+ * half drawn, producing visible tearing and disappearing menu elements.
+ */
+static volatile int ml_refresh_display_paused = 0;
+static volatile int ml_refresh_display_active = 0;
+
+void ml_refresh_display_pause(void)
+{
+    ml_refresh_display_paused = 1;
+
+    /* Let a presentation already in progress finish before changing staging. */
+    while (ml_refresh_display_active)
+        msleep(1);
+}
+
+void ml_refresh_display_resume(void)
+{
+    ml_refresh_display_paused = 0;
+}
+
 /** Returns a pointer to currently selected BMP vram (real or mirror) */
 uint8_t * bmp_vram(void)
 {
@@ -207,6 +231,8 @@ void refresh_yuv_from_rgb(void)
         return;
     }
 
+    ml_refresh_display_active = 1;
+
 #if !defined(CONFIG_INSTALLER)
     if(zebra_should_run()){
         // always draw our stuff, including full alpha
@@ -240,17 +266,12 @@ void refresh_yuv_from_rgb(void)
             rgb_row = rgb_row + BMP_LAYER_WIDTH;
         }
 #else
-        //SJE FIXME benchmark this loop, it probably wants optimising
+        /* Same full-buffer RGBA conversion used by the existing
+         * zebra_should_run() path: preserve alpha in the destination layer.
+         */
         for (size_t n = 0; n < BMP_VRAM_SIZE; n++)
         {
-            // limited alpha support, if dest pixel would be full alpha,
-            // don't copy into dest.  This is COLOR_TRANSPARENT_BLACK in
-            // the LUT
-            uint32_t rgb = indexed2rgb(*b);
-            if ((rgb && 0xff000000) == 0x00000000)
-                rgb_data++;
-            else
-                *rgb_data++ = rgb;
+            *rgb_data++ = indexed2rgb(*b);
             b++;
         }
 #endif
@@ -267,6 +288,7 @@ void refresh_yuv_from_rgb(void)
     give_semaphore(winsys_sem);
 #endif
     ml_refresh_display_needed = 0;
+    ml_refresh_display_active = 0;
 }
 
 void rgba_buffer_clear()
@@ -285,13 +307,23 @@ void refresh_yuv_from_rgb_task(void *unused)
 {
     #ifdef CONFIG_COMPOSITOR_DEDICATED_LAYER
     DryosDebugMsg(0, 15, "Canon layer: 0x%08x", rgb_vram_info);
-    // Try to initialize our layer.
+    #ifdef CONFIG_M6II
+    /*
+     * Reserve the opaque RGBA RAW-preview layer first. The regular ML RGBA
+     * overlay layer is created afterwards and remains above the preview.
+     */
+    compositor_preview_layer_setup();
+    #endif
+    // Try to initialize our normal RGBA overlay layer.
     compositor_layer_setup();
     DryosDebugMsg(0, 15, "Our layer: 0x%08x", rgb_vram_info);
     #endif
     TASK_LOOP
     {
-        if (ml_refresh_display_needed && !ml_shutdown_requested && DISPLAY_IS_ON)
+        if (ml_refresh_display_needed &&
+            !ml_refresh_display_paused &&
+            !ml_shutdown_requested &&
+            DISPLAY_IS_ON)
         {
             refresh_yuv_from_rgb();
         }
@@ -351,6 +383,26 @@ uint32_t indexed2rgb(uint8_t color)
     if (color < RGB_LUT_SIZE)
     {
         return indexed2rgbLUT[color];
+    }
+    else if (color >= COLOR_PREVIEW_RGB_BASE &&
+             color < COLOR_PREVIEW_RGB_BASE + COLOR_PREVIEW_RGB_COUNT)
+    {
+        /*
+         * Decode the compact 5x6x5 preview cube reserved in bmp.h.
+         * Keeping these colors outside the traditional ML palette means
+         * existing OSD colors and grayscale entries remain unchanged.
+         */
+        uint32_t v = color - COLOR_PREVIEW_RGB_BASE;
+        uint32_t bq = v % COLOR_PREVIEW_RGB_B_LEVELS;
+        v /= COLOR_PREVIEW_RGB_B_LEVELS;
+        uint32_t gq = v % COLOR_PREVIEW_RGB_G_LEVELS;
+        uint32_t rq = v / COLOR_PREVIEW_RGB_G_LEVELS;
+
+        uint32_t r = rq * 255 / (COLOR_PREVIEW_RGB_R_LEVELS - 1);
+        uint32_t g = gq * 255 / (COLOR_PREVIEW_RGB_G_LEVELS - 1);
+        uint32_t b = bq * 255 / (COLOR_PREVIEW_RGB_B_LEVELS - 1);
+
+        return 0xff000000 | (r << 16) | (g << 8) | b;
     }
     else
     {
