@@ -49,6 +49,9 @@ void mvr_rec_start_shoot();
 /* set zoom to 1x/5x/10x */
 /* todo: move somewhere else (where?) */
 void set_lv_zoom(int zoom);
+#ifdef CONFIG_M6II
+int m6ii_toggle_lv_zoom_native(void);
+#endif
 
 /* todo: move it somewhere else (playback tricks?) */
 void next_image_in_play_mode(int direction);

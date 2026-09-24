@@ -228,6 +228,9 @@ void lens_wait_readytotakepic(int wait);
 // return true on success
 extern int lens_set_rawaperture( int aperture);
 extern int lens_set_rawiso( int iso );
+#ifdef CONFIG_M6II
+int m6ii_lens_set_rawiso_native(int raw);
+#endif
 extern int lens_set_rawshutter( int shutter );
 extern int lens_set_ae( int ae );
 extern int lens_set_flash_ae( int ae );

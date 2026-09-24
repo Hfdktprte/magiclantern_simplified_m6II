@@ -342,6 +342,11 @@ int should_run_polling_action(int period_ms, int* last_updated_time)
 
 static void do_this_every_second() // called every second
 {
+    #ifdef CONFIG_M6II
+    extern void m6ii_seed_shutter(void);
+    extern void m6ii_update_auto_iso(void);
+    if (lv) { m6ii_seed_shutter(); m6ii_update_auto_iso(); }
+    #endif
     #ifdef FEATURE_INTERVALOMETER
     if (intervalometer_running && lens_info.job_state == 0 && !gui_menu_shown() && !get_halfshutter_pressed())
         info_led_blink(1, 50, 0);
@@ -681,6 +686,49 @@ void get_afframe_sensor_res(int* W, int* H)
 }
 
 
+#ifdef CONFIG_M6II
+static uint8_t m6ii_lv_dispsize_payload[32];
+static unsigned m6ii_lv_dispsize_payload_len = 0;
+static volatile uint32_t m6ii_lv_dispsize_current = 1;
+
+static void m6ii_cache_lv_dispsize(const uint32_t *buf, unsigned len)
+{
+    if (len >= 4 && len <= sizeof(m6ii_lv_dispsize_payload))
+    {
+        memcpy(m6ii_lv_dispsize_payload, buf, len);
+        m6ii_lv_dispsize_payload_len = len;
+        m6ii_lv_dispsize_current = buf[0];
+    }
+}
+
+int m6ii_toggle_lv_zoom_native(void)
+{
+    if (m6ii_lv_dispsize_payload_len < 4 ||
+        m6ii_lv_dispsize_payload_len > sizeof(m6ii_lv_dispsize_payload))
+        return 0;
+
+    uint8_t payload[32];
+    memcpy(payload, m6ii_lv_dispsize_payload, m6ii_lv_dispsize_payload_len);
+
+    uint32_t zoom = (m6ii_lv_dispsize_current == 10) ? 1u : 10u;
+    *(uint32_t *)payload = zoom;
+
+    prop_request_change_wait(PROP_LV_DISPSIZE,
+                             payload,
+                             m6ii_lv_dispsize_payload_len,
+                             1000);
+
+    return 1;
+}
+
+#ifndef FEATURE_LV_ZOOM_SETTINGS
+PROP_HANDLER(PROP_LV_DISPSIZE)
+{
+    m6ii_cache_lv_dispsize(buf, len);
+}
+#endif
+#endif
+
 #ifdef FEATURE_LV_ZOOM_SETTINGS
 PROP_HANDLER( PROP_HALF_SHUTTER ) {
     zoom_sharpen_step();
@@ -690,6 +738,9 @@ static int zoom_was_triggered_by_halfshutter = 0;
 
 PROP_HANDLER(PROP_LV_DISPSIZE)
 {
+#ifdef CONFIG_M6II
+    m6ii_cache_lv_dispsize(buf, len);
+#endif
     /* note: 0x81 is a special screen before zooming in, on newer cameras */
     int zoom = buf[0];
 

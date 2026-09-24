@@ -133,8 +133,11 @@ const uint8_t codes_aperture[APERTURE_ARRAY_LEN] =
         89,  90,  91,  92,  93,  94,  95,  96};
 
 // in 1/2 - 1/3 EV, same values as Canon display:
-//~ static const int values_aperture[] = {0,12,13,14,16,18,20,22,25,28,32,35,40,45,50,56,63,67,71,80,90,95,100,110,130,140,160,180,190,200,220,250,270,290,320,360,380,400,450};
-//~ static const int codes_aperture[] =  {0,13,14,16,19,21,24,27,29,32,35,37,40,44,45,48,51,52,53,56,59,60, 61, 64, 68, 69, 72, 75, 76, 77, 80, 83, 84, 85, 88, 91, 92, 93, 96};
+#ifdef CONFIG_M6II
+static const int values_aperture_display[] = {0,12,13,14,16,18,20,22,25,28,32,35,40,45,50,56,63,67,71,80,90,95,100,110,130,140,160,180,190,200,220,250,270,290,320,360,380,400,450};
+static const int codes_aperture_display[] =  {0,13,14,16,19,21,24,27,29,32,35,37,40,44,45,48,51,52,53,56,59,60, 61, 64, 68, 69, 72, 75, 76, 77, 80, 83, 84, 85, 88, 91, 92, 93, 96};
+static int m6ii_aperture_value(int raw) { if (raw < 13) return RAW2VALUE(aperture, raw); unsigned i = 1; while (i < COUNT(codes_aperture_display) && codes_aperture_display[i] < raw) i++; if (i >= COUNT(codes_aperture_display)) return RAW2VALUE(aperture, raw); if (i > 1 && raw - codes_aperture_display[i-1] <= codes_aperture_display[i] - raw) i--; return values_aperture_display[i]; }
+#endif
 
 // for movie logging
 #ifdef FEATURE_MOVIE_LOGGING
@@ -149,6 +152,7 @@ void bv_update_lensinfo();
 void bv_auto_update();
 static void lensinfo_set_aperture(int raw);
 static void bv_expsim_shift();
+
 
 static CONFIG_INT("movie.log", movie_log, 0);
 #ifdef CONFIG_FULLFRAME
@@ -614,6 +618,9 @@ const char * lens_format_shutter(int raw_shutter)
 const char * lens_format_aperture(int raw_aperture)
 {
     int f = RAW2VALUE(aperture, raw_aperture);
+#ifdef CONFIG_M6II
+    f = m6ii_aperture_value(raw_aperture);
+#endif
     
     static char aperture[16];
     if (f < 100)
@@ -1488,6 +1495,15 @@ RAWVAL_FUNC(iso)
 RAWVAL_FUNC(shutter)
 RAWVAL_FUNC(aperture)
 
+#ifdef CONFIG_M6II
+extern int GUI_GetOlcTvForApex(uint16_t *code, int disp_info);
+extern int GUI_GetOlcIsoForApex(uint16_t *code, int disp_info);
+static int m6ii_prop_raw(const void *b, int base, int zero) { int p = *(const int16_t *)b; if (!p && zero) return 0; p -= zero * 256; return base + (p + (p >= 0 ? 48 : -48)) / 96; }
+#define PROP_EXPO_RAW(b,base,zero) m6ii_prop_raw(b,base,zero)
+#else
+#define PROP_EXPO_RAW(b,base,zero) ((b)[0])
+#endif
+
 static void lensinfo_set_iso(int raw)
 {
     lens_info.raw_iso = raw;
@@ -1503,6 +1519,27 @@ static void lensinfo_set_shutter(int raw)
     update_stuff();
 }
 
+#ifdef CONFIG_M6II
+void m6ii_seed_shutter(void)
+{
+    uint16_t p = 0;
+    if (!lens_info.shutter && GUI_GetOlcTvForApex(&p, 0))
+        lensinfo_set_shutter(m6ii_prop_raw(&p, 56, 0));
+}
+
+void m6ii_update_auto_iso(void)
+{
+    uint16_t p = 0;
+    if (!lens_info.raw_iso && GUI_GetOlcIsoForApex(&p, 0) && p)
+    {
+        lens_info.raw_iso_auto = m6ii_prop_raw(&p, 72, 15);
+        lens_info.iso_auto = RAW2VALUE(iso, lens_info.raw_iso_auto);
+        lens_info.iso = lens_info.iso_auto;
+        update_stuff();
+    }
+}
+#endif
+
 static void lensinfo_set_aperture(int raw)
 {
     if (raw)
@@ -1510,7 +1547,11 @@ static void lensinfo_set_aperture(int raw)
         if (lens_info.raw_aperture_min && lens_info.raw_aperture_max)
             raw = COERCE(raw, lens_info.raw_aperture_min, lens_info.raw_aperture_max);
         lens_info.raw_aperture = raw;
+#ifdef CONFIG_M6II
+        lens_info.aperture = m6ii_aperture_value(raw);
+#else
         lens_info.aperture = RAW2VALUE(aperture, raw);
+#endif
     }
     else
     {
@@ -1538,10 +1579,49 @@ extern int bv_auto;
     #define CONFIG_MOVIE_EXPO_OVERRIDE_DISABLE_SYNC_WITH_PROPS
 #endif
 
+#ifdef CONFIG_M6II
+static uint8_t m6ii_prop_iso_payload[32];
+static unsigned m6ii_prop_iso_payload_len = 0;
+
+int m6ii_lens_set_rawiso_native(int raw)
+{
+    if (m6ii_prop_iso_payload_len < 2 ||
+        m6ii_prop_iso_payload_len > sizeof(m6ii_prop_iso_payload))
+        return 0;
+
+    uint8_t payload[32];
+    memcpy(payload, m6ii_prop_iso_payload, m6ii_prop_iso_payload_len);
+
+    /*
+     * Inverse of m6ii_prop_raw(buf, 72, 15):
+     * raw = 72 + round((p - 15*256) / 96)
+     */
+    int p = (raw - 72) * 96 + 15 * 256;
+    *(int16_t *)payload = (int16_t)p;
+
+    /* Use Canon's direct PROP_ISO request path on DIGIC VIII. */
+    extern void _prop_request_change(unsigned property, const void *addr, size_t len);
+    _prop_request_change(PROP_ISO, payload, m6ii_prop_iso_payload_len);
+
+    /* Mirror the requested value until Canon's PROP_ISO update arrives. */
+    lensinfo_set_iso(raw);
+    lens_display_set_dirty();
+
+    return 1;
+}
+#endif
+
 static int iso_ack = -1;
 PROP_HANDLER( PROP_ISO )
 {
-    if (!CONTROL_BV) lensinfo_set_iso(buf[0]);
+#ifdef CONFIG_M6II
+    if (len >= 2 && len <= sizeof(m6ii_prop_iso_payload))
+    {
+        memcpy(m6ii_prop_iso_payload, buf, len);
+        m6ii_prop_iso_payload_len = len;
+    }
+#endif
+    if (!CONTROL_BV) lensinfo_set_iso(PROP_EXPO_RAW(buf, 72, 15));
     #ifdef FEATURE_EXPO_OVERRIDE
     else if 
         (
@@ -1559,7 +1639,7 @@ PROP_HANDLER( PROP_ISO )
     bv_auto_update();
     #endif
     lens_display_set_dirty();
-    iso_ack = buf[0];
+    iso_ack = PROP_EXPO_RAW(buf, 72, 15);
 }
 
 void iso_auto_restore_hack()
@@ -1569,7 +1649,10 @@ void iso_auto_restore_hack()
 
 PROP_HANDLER( PROP_ISO_AUTO )
 {
-    uint32_t raw = *(uint32_t *) buf;
+    uint32_t raw = *(const uint16_t *)buf ? PROP_EXPO_RAW(buf, 72, 15) : 0;
+    #ifdef CONFIG_M6II
+    if (!raw) { m6ii_update_auto_iso(); return; }
+    #endif
 
     #if defined(FRAME_ISO)
     if (lv && is_movie_mode()) raw = (uint8_t)FRAME_ISO;
@@ -1577,6 +1660,7 @@ PROP_HANDLER( PROP_ISO_AUTO )
 
     lens_info.raw_iso_auto = raw;
     lens_info.iso_auto = RAW2VALUE(iso, raw);
+    if (!lens_info.raw_iso) lens_info.iso = lens_info.iso_auto;
 
     update_stuff();
 }
@@ -1603,7 +1687,7 @@ PROP_HANDLER( PROP_SHUTTER )
     if (!CONTROL_BV) 
     {
         if (shooting_mode != SHOOTMODE_AV && shooting_mode != SHOOTMODE_P)
-            lensinfo_set_shutter(buf[0]);
+            lensinfo_set_shutter(PROP_EXPO_RAW(buf, 56, 0));
     }
     #ifdef FEATURE_EXPO_OVERRIDE
     else if (buf[0]  // sync expo override to Canon values
@@ -1633,7 +1717,7 @@ PROP_HANDLER( PROP_APERTURE )
     //~ NotifyBox(2000, "%x %x %x %x ", buf[0], CONTROL_BV, lens_info.raw_aperture_min, lens_info.raw_aperture_max);
     if (!CONTROL_BV)
     {
-        lensinfo_set_aperture(buf[0]);
+        lensinfo_set_aperture(PROP_EXPO_RAW(buf, 8, 0));
     }
     #ifdef FEATURE_EXPO_OVERRIDE
     else if (buf[0] && !gui_menu_shown()
@@ -1658,14 +1742,14 @@ PROP_HANDLER( PROP_APERTURE_AUTO )
     {
         /* in these modes, aperture is not automatic */
         /* however, this property sometimes becomes 0 in these modes as well, but this is not desired */
-        if (buf[0] == 0)
+        if (PROP_EXPO_RAW(buf, 0, 0) == 0)
             return;
     }
 
     if (!CONTROL_BV)
     {
         /* expo override turned off? */
-        lensinfo_set_aperture(buf[0]);
+        lensinfo_set_aperture(PROP_EXPO_RAW(buf, 8, 0));
     }
 
     lens_display_set_dirty();
@@ -1688,8 +1772,8 @@ PROP_HANDLER( PROP_SHUTTER_AUTO )
     {
         /* expo override turned off? */
         /* todo: double-check if it's still needed */
-        if (ABS(buf[0] - lens_info.raw_shutter) > 3) 
-            lensinfo_set_shutter(buf[0]);
+        if (ABS(PROP_EXPO_RAW(buf, 56, 0) - lens_info.raw_shutter) > 3) 
+            lensinfo_set_shutter(PROP_EXPO_RAW(buf, 56, 0));
     }
     
     lens_display_set_dirty();
@@ -1826,9 +1910,10 @@ void split_iso(int raw_iso, unsigned int* analog_iso, int* digital_gain)
 
 void iso_components_update()
 {
-    split_iso(lens_info.raw_iso, &lens_info.iso_analog_raw, &lens_info.iso_digital_ev);
+    int raw_iso = lens_info.raw_iso ? lens_info.raw_iso : lens_info.raw_iso_auto;
+    split_iso(raw_iso, &lens_info.iso_analog_raw, &lens_info.iso_digital_ev);
 
-    lens_info.iso_equiv_raw = lens_info.raw_iso;
+    lens_info.iso_equiv_raw = raw_iso;
 
     int digic_gain = get_digic_iso_gain_movie();
     if (lens_info.iso_equiv_raw && digic_gain != 1024 && is_movie_mode())
@@ -2922,20 +3007,18 @@ static LVINFO_UPDATE_FUNC(alo_htp_update)
 
 static LVINFO_UPDATE_FUNC(temp_update)
 {
-  #ifdef EFIC_CELSIUS
+#if defined(CONFIG_M6II) || defined(EFIC_CELSIUS)
     LVINFO_BUFFER(8);
-    
+#ifdef CONFIG_M6II
+    extern int GetRearTemperature(void);
+    int t = GetRearTemperature() / 16;
+#else
     int t = EFIC_CELSIUS;
-    snprintf(buffer, sizeof(buffer), "%d"SYM_DEGREE"C", t);
-    if (t >= 60)
-    {
-        item->color_bg = COLOR_RED;
-    }
-    else if (t >= 50)
-    {
-        item->color_bg = COLOR_ORANGE;
-    }
-  #endif
+#endif
+    if (t > -40 && t < 150) snprintf(buffer, sizeof(buffer), "%d"SYM_DEGREE"C", t);
+    if (t >= 60) item->color_bg = COLOR_RED;
+    else if (t >= 50) item->color_bg = COLOR_ORANGE;
+#endif
 }
 
 static LVINFO_UPDATE_FUNC(mvi_number_update)
@@ -3069,6 +3152,9 @@ static int (*dual_iso_get_alternate_iso)() = MODULE_FUNCTION(dual_iso_get_altern
 static LVINFO_UPDATE_FUNC(iso_update)
 {
     LVINFO_BUFFER(16);
+    #ifdef CONFIG_M6II
+    m6ii_update_auto_iso();
+    #endif
 
     if (hdr_video_enabled())
     {
@@ -3096,13 +3182,14 @@ static LVINFO_UPDATE_FUNC(iso_update)
         }
 
         /* this includes ML ISO digital gains, if any */
-        int iso_equiv_raw = lens_info.iso_equiv_raw;
+        int base_iso_raw = lens_info.raw_iso ? lens_info.raw_iso : lens_info.raw_iso_auto;
+        int iso_equiv_raw = lens_info.raw_iso ? lens_info.iso_equiv_raw : lens_info.raw_iso_auto;
         
         #ifdef FEATURE_FPS_OVERRIDE
         iso_equiv_raw += fps_get_iso_correction_evx8();
         #endif
         
-        int digital_gain = iso_equiv_raw - lens_info.raw_iso;
+        int digital_gain = iso_equiv_raw - base_iso_raw;
         
         if (digital_gain > 1)
         {
@@ -3113,13 +3200,13 @@ static LVINFO_UPDATE_FUNC(iso_update)
         #ifdef FRAME_ISO
         int lv_iso = (FRAME_ISO & 0xFF) + (get_htp() ? 8 : 0);
         #else
-        int lv_iso = lens_info.raw_iso;
+        int lv_iso = base_iso_raw;
         #endif
 
-        if (ABS(lv_iso - lens_info.raw_iso) > 3)
+        if (ABS(lv_iso - base_iso_raw) > 3)
         {
             /* for some reason, the ISO being used is different from the one reported in properties */
-            iso_equiv_raw += lv_iso - lens_info.raw_iso;
+            iso_equiv_raw += lv_iso - base_iso_raw;
         }
 
         if (raw_lv_is_enabled())
