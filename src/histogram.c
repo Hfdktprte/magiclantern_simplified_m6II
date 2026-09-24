@@ -24,15 +24,25 @@ extern int FAST get_y_skip_offset_for_overlays();
 extern int nondigic_zoom_overlay_enabled();
 
 
+#ifdef CONFIG_M6II
+CONFIG_INT( "hist.draw", hist_draw,  0 );
+#else
 CONFIG_INT( "hist.draw", hist_draw,  1 );
+#endif
 #ifdef FEATURE_RAW_HISTOGRAM
 CONFIG_INT( "hist.type", hist_type,  2 );
 #else
 CONFIG_INT( "hist.type", hist_type,  1 );
 #endif
+#ifdef CONFIG_M6II
+CONFIG_INT( "hist.warn", hist_warn,  0 );
+CONFIG_INT( "hist.log",  hist_log,   0 );
+CONFIG_INT( "hist.meter", hist_meter,  0);
+#else
 CONFIG_INT( "hist.warn", hist_warn,  1 );
 CONFIG_INT( "hist.log",  hist_log,   1 );
 CONFIG_INT( "hist.meter", hist_meter,  2);
+#endif
 
 struct Histogram histogram;
 
@@ -43,68 +53,204 @@ struct Histogram histogram;
 
 static void histobar_refresh();
 
+/* Ported from the cached RAW histogram path in Hfdktprte/abcdefgh. */
+static int r2ev_white_level = -1;
+static int r2ev_black_level = -1;
+static uint8_t r2ev[16384];
+
+static void hist_build_r2ev_cache()
+{
+    if (r2ev_white_level == raw_info.white_level &&
+        r2ev_black_level == raw_info.black_level)
+        return;
+
+    r2ev_white_level = raw_info.white_level;
+    r2ev_black_level = raw_info.black_level;
+
+    for (int i = 0; i < 16384; i++)
+        r2ev[i] = COERCE((raw_to_ev(i) + 12) * (HIST_WIDTH - 1) / 12,
+                         0, HIST_WIDTH - 1);
+}
+
+#ifdef CONFIG_M6II
+/* Smooth adjacent bins for display; clipping still uses unsmoothed RAW bins. */
+static uint32_t m6ii_hist_smooth[HIST_WIDTH];
+
+static void m6ii_hist_prepare_smooth_display(void)
+{
+    for (int i = 0; i < HIST_WIDTH; i++)
+    {
+        uint32_t l = histogram.hist[i > 0 ? i - 1 : 0];
+        uint32_t c = histogram.hist[i];
+        uint32_t r = histogram.hist[i < HIST_WIDTH - 1 ? i + 1 : HIST_WIDTH - 1];
+        m6ii_hist_smooth[i] = (l + 2 * c + r) / 4;
+    }
+}
+#endif
+
+#ifdef CONFIG_M6II
+/*
+ * M6 II RAW LiveView may be packed at 10, 12 or 14 bits. The generic
+ * raw_*_pixel helpers assume Canon's legacy 14-bit raw_pixblock layout, so
+ * read the packed stream directly (same packing used by M6 II RAW zebras).
+ */
+static inline uint16_t m6ii_raw_hist_get_pixel(int x, int y)
+{
+    int bpp = raw_info.bits_per_pixel;
+
+    if (bpp != 10 && bpp != 12 && bpp != 14)
+        return 0;
+
+    if (!raw_info.buffer || x < 0 || y < 0 ||
+        x >= raw_info.width || y >= raw_info.height)
+        return 0;
+
+    const uint8_t *row = (const uint8_t *)raw_info.buffer + y * raw_info.pitch;
+    int src_pos = x * bpp / 16;
+    int bits_left = (bpp * x - 16 * src_pos) % 16;
+    int shift_right = 16 - bpp - bits_left;
+    int byte_pos = src_pos * 2;
+
+    uint32_t value = row[byte_pos] | ((uint32_t)row[byte_pos + 1] << 8);
+
+    if (shift_right >= 0)
+    {
+        value >>= shift_right;
+    }
+    else
+    {
+        uint32_t value2 =
+            row[byte_pos + 2] | ((uint32_t)row[byte_pos + 3] << 8);
+        value <<= -shift_right;
+        value |= value2 >> (16 + shift_right);
+    }
+
+    return value & ((1u << bpp) - 1);
+}
+#endif
+
 void FAST hist_build_raw()
 {
-    if (!raw_update_params()) return;
+    if (!raw_update_params())
+        return;
 
     memset(&histogram, 0, sizeof(histogram));
     histogram.is_raw = 1;
 
     int step = lv ? 4 : 2;
 
-    /* mapping from 14-bit RAW to EV on the 12-bit histogram:
-     * above raw_info.white_level: last bin (HIST_WIDTH-1)
-     * 12 stops below that: first bin (0)
-     * raw_to_ev returns 0 at white level or above,
-     * and negative floating point values below */
-    char r2ev[16384];
-    for (int i = 0; i < 16384; i++)
-    {
-        r2ev[i] = COERCE((raw_to_ev(i) + 12) * (HIST_WIDTH-1) / 12, 0, HIST_WIDTH-1);
-        qprintf("[HIST] RAW %d => %d (white=%d)\n", i, r2ev[i], raw_info.white_level);
-    }
+    hist_build_r2ev_cache();
+
+#ifdef CONFIG_M6II
+    int bpp = raw_info.bits_per_pixel;
+    if (bpp != 10 && bpp != 12 && bpp != 14)
+        return;
+
+    int to_14bit = 14 - bpp;
 
     for (int i = os.y0; i < os.y_max; i += step)
     {
         int y = BM2RAW_Y(i);
-        if (y < raw_info.active_area.y1+8 || y > raw_info.active_area.y2-8) continue;
+        if (y < raw_info.active_area.y1 + 8 ||
+            y > raw_info.active_area.y2 - 8)
+            continue;
 
         for (int j = os.x0; j < os.x_max; j += 8)
         {
             int x = BM2RAW_X(j);
-            if (x < raw_info.active_area.x1+8 || x > raw_info.active_area.x2-8) continue;
+            if (x < raw_info.active_area.x1 + 8 ||
+                x > raw_info.active_area.x2 - 8)
+                continue;
+
+            /*
+             * raw_info.cfa_pattern is RGGB on M6 II:
+             *
+             *   R G
+             *   G B
+             *
+             * Use one Bayer cell per sample and average both green sites.
+             */
+            int bx = x & ~1;
+            int by = y & ~1;
+
+            if (bx + 1 >= raw_info.width || by + 1 >= raw_info.height)
+                continue;
+
+            int r = m6ii_raw_hist_get_pixel(bx,     by);
+            int g1 = m6ii_raw_hist_get_pixel(bx + 1, by);
+            int g2 = m6ii_raw_hist_get_pixel(bx,     by + 1);
+            int b = m6ii_raw_hist_get_pixel(bx + 1, by + 1);
+
+            /* Normalize packed 10/12-bit samples to ML's 14-bit EV domain. */
+            r <<= to_14bit;
+            g1 <<= to_14bit;
+            g2 <<= to_14bit;
+            b <<= to_14bit;
+
+            int g = (g1 + g2) >> 1;
+
+            if (r == 0 || g == 0 || b == 0)
+                continue;
+
+            int ir = r2ev[COERCE(r, 0, 16383)];
+            int ig = r2ev[COERCE(g, 0, 16383)];
+            int ib = r2ev[COERCE(b, 0, 16383)];
+
+            histogram.hist_r[ir]++;
+            histogram.hist_g[ig]++;
+            histogram.hist_b[ib]++;
+
+            /* Use green RAW samples for the visible histogram curve. */
+            histogram.hist[ig]++;
+            histogram.total_px++;
+        }
+    }
+#else
+    for (int i = os.y0; i < os.y_max; i += step)
+    {
+        int y = BM2RAW_Y(i);
+        if (y < raw_info.active_area.y1+8 || y > raw_info.active_area.y2-8)
+            continue;
+
+        for (int j = os.x0; j < os.x_max; j += 8)
+        {
+            int x = BM2RAW_X(j);
+            if (x < raw_info.active_area.x1+8 || x > raw_info.active_area.x2-8)
+                continue;
 
             int r = raw_red_pixel_dark(x, y);
             int g = raw_green_pixel_dark(x, y);
             int b = raw_blue_pixel_dark(x, y);
 
-            /* ignore bad pixels */
-            if (r == 0 || g == 0 || b == 0) continue;
+            if (r == 0 || g == 0 || b == 0)
+                continue;
 
-            int ir = r2ev[r];
-            int ig = r2ev[g];
-            int ib = r2ev[b];
-            
-            histogram.hist_r[ir]++;
-            histogram.hist_g[ig]++;
-            histogram.hist_b[ib]++;
+            histogram.hist_r[r2ev[r]]++;
+            histogram.hist_g[r2ev[g]]++;
+            histogram.hist_b[r2ev[b]]++;
             histogram.total_px++;
         }
     }
-    
-    /* in dark areas, spread the histogram count to show solid histogram instead of isolated bars */
-    for (int i = 0; i < 5000; i++)
+#endif
+
+    /* Spread sparse dark bins for a smoother low-end curve. */
+    for (int i = 1; i < 5000; i++)
     {
         int ev0 = r2ev[i];
         int evplus = r2ev[i+1];
         int evminus = r2ev[i-1];
-        if (evplus - evminus > 2) /* will there be a gap? fill it */
+
+        if (evplus - evminus > 2)
         {
             int num_bins = evplus - evminus - 1;
             int delta_r = histogram.hist_r[ev0] / num_bins;
             int delta_g = histogram.hist_g[ev0] / num_bins;
             int delta_b = histogram.hist_b[ev0] / num_bins;
-            for (int e = evminus+1; e <= evplus-1; e++)
+#ifdef CONFIG_M6II
+            int delta_y = histogram.hist[ev0] / num_bins;
+#endif
+
+            for (int e = evminus + 1; e <= evplus - 1; e++)
             {
                 histogram.hist_r[e] += delta_r;
                 histogram.hist_g[e] += delta_g;
@@ -112,18 +258,30 @@ void FAST hist_build_raw()
                 histogram.hist_r[ev0] -= delta_r;
                 histogram.hist_g[ev0] -= delta_g;
                 histogram.hist_b[ev0] -= delta_b;
+#ifdef CONFIG_M6II
+                histogram.hist[e] += delta_y;
+                histogram.hist[ev0] -= delta_y;
+#endif
             }
         }
     }
-    
+
     for (int i = 0; i < HIST_WIDTH; i++)
     {
+#ifdef CONFIG_M6II
+        histogram.max = MAX(histogram.max, histogram.hist[i]);
+#else
         histogram.max = MAX(histogram.max, histogram.hist_r[i]);
         histogram.max = MAX(histogram.max, histogram.hist_g[i]);
         histogram.max = MAX(histogram.max, histogram.hist_b[i]);
+#endif
     }
 
+#ifdef CONFIG_M6II
+    m6ii_hist_prepare_smooth_display();
+#else
     histobar_refresh();
+#endif
 }
 
 MENU_UPDATE_FUNC(raw_histo_update)
@@ -245,7 +403,7 @@ void hist_draw_image(
 
     int log_max = log_length(histogram.max);
 
-    #ifdef FEATURE_RAW_HISTOGRAM
+    #if defined(FEATURE_RAW_HISTOGRAM) && !defined(CONFIG_M6II)
     const int v = (1200 - raw_info.dynamic_range) * HIST_WIDTH / 1200;
     int underexposed_level = COERCE(v, 0, HIST_WIDTH-1);
     int stops_until_overexposure = 0;
@@ -254,7 +412,15 @@ void hist_draw_image(
     for( i=0 ; i < HIST_WIDTH ; i++ )
     {
         // Scale by the maximum bin value
-        const uint32_t size  = hist_log ? log_length(histogram.hist[i])   * hist_height / log_max : (histogram.hist[i]   * hist_height) / histogram.max;
+#ifdef CONFIG_M6II
+        const uint32_t size = histogram.is_raw
+            ? (m6ii_hist_smooth[i] * hist_height) / histogram.max
+            : (hist_log ? log_length(histogram.hist[i]) * hist_height / log_max
+                        : (histogram.hist[i] * hist_height) / histogram.max);
+#else
+        const uint32_t size = hist_log ? log_length(histogram.hist[i]) * hist_height / log_max
+                                       : (histogram.hist[i] * hist_height) / histogram.max;
+#endif
         const uint32_t sizeR = hist_log ? log_length(histogram.hist_r[i]) * hist_height / log_max : (histogram.hist_r[i] * hist_height) / histogram.max;
         const uint32_t sizeG = hist_log ? log_length(histogram.hist_g[i]) * hist_height / log_max : (histogram.hist_g[i] * hist_height) / histogram.max;
         const uint32_t sizeB = hist_log ? log_length(histogram.hist_b[i]) * hist_height / log_max : (histogram.hist_b[i] * hist_height) / histogram.max;
@@ -263,6 +429,11 @@ void hist_draw_image(
         // vertical line up to the hist size
         for( y=hist_height ; y>0 ; y-- , col += BMPPITCH )
         {
+#ifdef CONFIG_M6II
+            if (histogram.is_raw)
+                *col = y > size ? COLOR_BLACK : COLOR_WHITE;
+            else
+#endif
             if (histogram.is_rgb)
                 *col = hist_rgb_color(y, sizeR, sizeG, sizeB);
             else
@@ -276,6 +447,22 @@ void hist_draw_image(
 
 #if defined(FEATURE_HISTOGRAM)
         /* draw clip warnings */
+#ifdef CONFIG_M6II
+        if (histogram.is_raw && i == HIST_WIDTH - 1)
+        {
+            unsigned int thr = MAX(histogram.total_px / 100000, 1);
+            int yw = y_origin + 12;
+
+            /* abcdefgh slim style: three fixed-size solid dots, no labels. */
+            if (histogram.hist_r[i] > thr)
+                fill_circle(x_origin + HIST_WIDTH/2 - 25, yw, 5, COLOR_RED);
+            if (histogram.hist_g[i] > thr)
+                fill_circle(x_origin + HIST_WIDTH/2,      yw, 5, COLOR_GREEN2);
+            if (histogram.hist_b[i] > thr)
+                fill_circle(x_origin + HIST_WIDTH/2 + 25, yw, 5, COLOR_CYAN);
+        }
+        else
+#endif
         if (hist_warn && i == HIST_WIDTH - 1)
         {
             unsigned int thr = histogram.total_px / 100000; // start at 0.0001 with a tiny dot
@@ -299,7 +486,7 @@ void hist_draw_image(
             }
         }
 #endif
-        #ifdef FEATURE_RAW_HISTOGRAM
+        #if defined(FEATURE_RAW_HISTOGRAM) && !defined(CONFIG_M6II)
         /* divide the histogram in 12 equal slices - each slice is 1 EV */
         if (histogram.is_raw)
         {
@@ -341,7 +528,7 @@ void hist_draw_image(
     /* draw histogram border */
     bmp_draw_rect(60, x_origin-1, y_origin-1, HIST_WIDTH+2, hist_height+2);
 
-    #ifdef FEATURE_RAW_HISTOGRAM
+    #if defined(FEATURE_RAW_HISTOGRAM) && !defined(CONFIG_M6II)
     if (histogram.is_raw)
     {
         char msg[10];

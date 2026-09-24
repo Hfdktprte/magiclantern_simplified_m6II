@@ -209,6 +209,9 @@ static int redraw_flood_stop = 0;
 
 static int hist_countdown = 3; // histogram is slow, so draw it less often
 
+static REQUIRES(menu_sem)
+struct menu * menu_find_by_name_internal(const char *name, int icon);
+
 int is_submenu_or_edit_mode_active() { return gui_menu_shown() && SUBMENU_OR_EDIT; }
 int get_menu_edit_mode() { return edit_mode; }
 
@@ -218,6 +221,50 @@ int get_menu_edit_mode() { return edit_mode; }
 static CONFIG_INT("menu.first", menu_first_by_icon, ICON_ML_INFO);
 
 void menu_set_dirty() { menu_damage = 1; }
+
+void menu_move_entry_to_end(const char *menu_name, const char *entry_name)
+{
+    if (!menu_name || !entry_name)
+        return;
+
+    take_semaphore(menu_sem, 0);
+
+    struct menu *menu = menu_find_by_name_internal(menu_name, 0);
+    if (!menu || !menu->children)
+    {
+        give_semaphore(menu_sem);
+        return;
+    }
+
+    struct menu_entry *entry = menu->children;
+    while (entry && !streq(entry->name, entry_name))
+        entry = entry->next;
+
+    if (!entry || !entry->next)
+    {
+        give_semaphore(menu_sem);
+        return;
+    }
+
+    /* unlink */
+    if (entry->prev)
+        entry->prev->next = entry->next;
+    else
+        menu->children = entry->next;
+    entry->next->prev = entry->prev;
+
+    /* append */
+    struct menu_entry *tail = menu->children;
+    while (tail->next)
+        tail = tail->next;
+
+    tail->next = entry;
+    entry->prev = tail;
+    entry->next = NULL;
+
+    menu_damage = 1;
+    give_semaphore(menu_sem);
+}
 
 int is_menu_help_active() { return gui_menu_shown() && menu_help_active; }
 
@@ -4739,6 +4786,16 @@ menu_redraw_do()
     if (gui_state == GUISTATE_MENUDISP)
         return;
 
+#if defined(CONFIG_M6II) && defined(FEATURE_VRAM_RGBA)
+    /*
+     * M6 II uses an indexed staging buffer plus an asynchronous RGBA
+     * compositor conversion task. Keep that task out while the menu frame is
+     * being constructed, then present the finished frame synchronously below.
+     */
+    ml_refresh_display_pause();
+    ml_refresh_display_needed = 0;
+#endif
+
     if (menu_help_active)
     {
         menu_help_redraw();
@@ -4878,10 +4935,20 @@ menu_redraw_do()
     }
 #endif
 
-    #ifdef CONFIG_VXWORKS   
-    set_ml_palette();    
+    #ifdef CONFIG_VXWORKS
+    set_ml_palette();
     #endif
+
+#if defined(CONFIG_M6II) && defined(FEATURE_VRAM_RGBA)
+    /*
+     * Present exactly once, after every menu pixel/icon has been drawn.
+     * refresh_yuv_from_rgb() clears ml_refresh_display_needed on completion.
+     */
+    refresh_yuv_from_rgb();
+    ml_refresh_display_resume();
+#else
     ml_refresh_display_needed = 1;
+#endif
 }
 
 void menu_benchmark()
@@ -5605,7 +5672,7 @@ void menu_redraw_flood()
         menu_redraw_full();
         msleep(20);
     }
-#ifdef FEATURE_VRAM_RGBA
+#if defined(FEATURE_VRAM_RGBA) && !defined(CONFIG_M6II)
     // force redraw now, it looks glitchy if you only set ml_refresh_display_needed
     refresh_yuv_from_rgb();
 #endif

@@ -196,6 +196,11 @@ int handle_common_events_startup(struct event * event)
 
 static int pre_shutdown_requested = 0; // used for preventing wakeup from paused LiveView at shutdown (causes race condition with Canon code and crashes)
 
+int gui_shutdown_in_progress()
+{
+    return ml_shutdown_requested || pre_shutdown_requested || sensor_cleaning;
+}
+
 void reset_pre_shutdown_flag_step() // called every second
 {
     if (pre_shutdown_requested && !sensor_cleaning)
@@ -446,6 +451,7 @@ static int handle_digital_zoom_shortcut(struct event * event)
 }
 #endif //FEATURE_DIGITAL_ZOOM_SHORTCUT
 
+
 static int null_event_handler(struct event * event) { return 1; }
 int handle_module_keys(struct event * event) __attribute__((weak,alias("null_event_handler")));
 int handle_flexinfo_keys(struct event * event) __attribute__((weak,alias("null_event_handler")));
@@ -465,6 +471,7 @@ int handle_common_events_by_feature(struct event * event)
         event->param == GMT_GUICMD_LOCK_OFF)
     {
         pre_shutdown_requested = 4;
+        BMP_LOCK( clrscr(); )
         info_led_on(); _card_led_on();
         return 1;
     }
@@ -526,7 +533,7 @@ int handle_common_events_by_feature(struct event * event)
 
     if (handle_ml_menu_erase(event) == 0) return 0;
     if (handle_ml_menu_keys(event) == 0) return 0;
-    
+
     #ifdef CONFIG_DIGIC_POKE
     if (handle_digic_poke(event) == 0) return 0;
     #endif

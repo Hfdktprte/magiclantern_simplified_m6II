@@ -40,6 +40,7 @@
 #include "focus.h"
 #include "lvinfo.h"
 #include "powersave.h"
+#include "module.h"
 
 #include "imgconv.h"
 #include "falsecolor.h"
@@ -88,6 +89,7 @@ static void schedule_transparent_overlay();
 //~ static void defish_draw_lv_color();
 static int zebra_color_word_row(int c, int y);
 static void spotmeter_step();
+static void clrscr_mirror( void );
 static int zebra_rgb_color(int underexposed, int clipR, int clipG, int clipB, int y);
 static int zebra_rgb_solid_color(int underexposed, int clipR, int clipG, int clipB);
 
@@ -193,6 +195,10 @@ static CONFIG_INT( "zebra.thr.hi",    zebra_level_hi, 99 );
 static CONFIG_INT( "zebra.thr.lo",    zebra_level_lo, 0 );
 static CONFIG_INT( "zebra.rec", zebra_rec,  1 );
 static CONFIG_INT( "zebra.raw.under", zebra_raw_underexposure,  1 );
+
+#ifdef CONFIG_M6II
+static int(*mlv_lite_raw_recording_state)(void) = MODULE_FUNCTION(mlv_lite_raw_recording_state);
+#endif
 
 #define MZ_ZOOM_WHILE_RECORDING 1
 #define MZ_ZOOMREC_N_FOCUS_RING 2
@@ -425,6 +431,7 @@ int get_global_draw() // menu setting, or off if
 
     extern int ml_started;
     if (!ml_started) return 0;
+    if (gui_shutdown_in_progress()) return 0;
     if (!global_draw) return 0;
     
     if (PLAY_MODE) return 1; // exception, always draw stuff in play mode
@@ -545,8 +552,9 @@ hist_build()
     }
     #endif
     
+    int vectorscope_draw = 0;
     #ifdef FEATURE_VECTORSCOPE
-    int vectorscope_draw = vectorscope_should_draw();
+    vectorscope_draw = vectorscope_should_draw();
     
     if (vectorscope_draw)
     {
@@ -555,17 +563,41 @@ hist_build()
     #endif
     
     #ifdef FEATURE_RAW_HISTOGRAM
+    #ifdef CONFIG_M6II
+    /*
+     * Avoid RAW histogram updates while mlv_lite owns RAW geometry during
+     * recording transitions.
+     */
+    if (RAW_HISTOGRAM_ENABLED &&
+        mlv_lite_raw_recording_state() == 0 &&
+        NOT_RECORDING &&
+        can_use_raw_overlays())
+    {
+        hist_build_raw();
+    }
+    else if (hist_draw)
+    {
+        /* RAW-only on M6 II; never substitute a YUV histogram. */
+        return;
+    }
+    #else
     if (RAW_HISTOGRAM_ENABLED && can_use_raw_overlays())
     {
         hist_build_raw();
     }
     #endif
+    #endif
     
+#ifdef CONFIG_M6II
+    /* M6 II displays a single green-channel RAW histogram curve. */
+    histogram.is_rgb = 0;
+#else
     histogram.is_rgb =
         histogram.is_raw ||    /* RAW histogram is always RGB-based */
         ((hist_type == 1 ||    /* Use YUV RGB histogram if selected */
           hist_type == 2) &&   /* Fall back to YUV RGB if we can't use the RAW RGB histogram */
          !EXT_MONITOR_RCA);    /* However, we cannot use YUV RGB histogram on RCA monitors, because they use YUV411 instead of YUV422 */
+#endif
     
     if (!waveform_draw && !vectorscope_draw && (!hist_draw || histogram.is_raw))
     {
@@ -616,8 +648,168 @@ hist_build()
 
 #ifdef FEATURE_RAW_ZEBRAS
 
+#ifdef CONFIG_M6II
+static CONFIG_INT("raw.zebra", raw_zebra_enable, 1); /* LiveView RAW zebras; recording is gated below */
+#else
 static CONFIG_INT("raw.zebra", raw_zebra_enable, 2); /* 1 = always, 2 = photo only */
+#endif
 #define RAW_ZEBRA_ENABLE (raw_zebra_enable == 1 || (raw_zebra_enable == 2 && !lv))
+
+#ifdef CONFIG_M6II
+static inline uint16_t m6ii_raw_zebra_get_pixel(int x, int y)
+{
+    int bpp = raw_info.bits_per_pixel;
+    if (bpp != 10 && bpp != 12 && bpp != 14)
+        return 0;
+
+    if (!raw_info.buffer || x < 0 || y < 0 ||
+        x >= raw_info.width || y >= raw_info.height)
+        return 0;
+
+    const uint8_t *row = (const uint8_t *) raw_info.buffer + y * raw_info.pitch;
+    int src_pos = x * bpp / 16;
+    int bits_left = (bpp * x - 16 * src_pos) % 16;
+    int shift_right = 16 - bpp - bits_left;
+    int byte_pos = src_pos * 2;
+
+    uint32_t value = row[byte_pos] | ((uint32_t) row[byte_pos + 1] << 8);
+
+    if (shift_right >= 0)
+    {
+        value >>= shift_right;
+    }
+    else
+    {
+        uint32_t value2 = row[byte_pos + 2] | ((uint32_t) row[byte_pos + 3] << 8);
+        value <<= -shift_right;
+        value |= value2 >> (16 + shift_right);
+    }
+
+    return value & ((1u << bpp) - 1);
+}
+
+static inline int m6ii_raw_zebra_block_max(int x, int y)
+{
+    x &= ~1;
+    y &= ~1;
+
+    if (x + 1 >= raw_info.width || y + 1 >= raw_info.height)
+        return 0;
+
+    int p0 = m6ii_raw_zebra_get_pixel(x,     y);
+    int p1 = m6ii_raw_zebra_get_pixel(x + 1, y);
+    int p2 = m6ii_raw_zebra_get_pixel(x,     y + 1);
+    int p3 = m6ii_raw_zebra_get_pixel(x + 1, y + 1);
+
+    return MAX(MAX(p0, p1), MAX(p2, p3));
+}
+
+static inline int m6ii_raw_zebra_block_min(int x, int y)
+{
+    x &= ~1;
+    y &= ~1;
+
+    if (x + 1 >= raw_info.width || y + 1 >= raw_info.height)
+        return 0;
+
+    int p0 = m6ii_raw_zebra_get_pixel(x,     y);
+    int p1 = m6ii_raw_zebra_get_pixel(x + 1, y);
+    int p2 = m6ii_raw_zebra_get_pixel(x,     y + 1);
+    int p3 = m6ii_raw_zebra_get_pixel(x + 1, y + 1);
+
+    return MIN(MIN(p0, p1), MIN(p2, p3));
+}
+
+static inline void m6ii_raw_zebra_write4(
+    uint8_t *bvram,
+    uint8_t *mirror,
+    int x,
+    int y,
+    uint32_t color)
+{
+    uint32_t *bp = (uint32_t *)(bvram + BM(x, y));
+    uint32_t *mp = (uint32_t *)(mirror + BM(x, y));
+
+    if (*bp != 0 && *bp != *mp)
+        return;
+    if (*mp & 0x80808080)
+        return;
+
+    *bp = *mp = color;
+}
+
+static void FAST draw_zebras_raw_lv_m6ii()
+{
+    if (RECORDING || mlv_lite_raw_recording_state() != 0 || !raw_update_params())
+        return;
+
+    int bpp = raw_info.bits_per_pixel;
+    if (bpp != 10 && bpp != 12 && bpp != 14)
+        return;
+
+    uint8_t *bvram = bmp_vram();
+    uint8_t *mirror = get_bvram_mirror();
+    if (!bvram || !mirror || !raw_info.buffer)
+        return;
+
+    int level_shift = 14 - bpp;
+    int white = raw_info.white_level >> level_shift;
+    int black = raw_info.black_level >> level_shift;
+    int max_value = (1 << bpp) - 1;
+
+    white = COERCE(white, black + 1, max_value);
+
+    int under = 0;
+    if (zebra_raw_underexposure)
+    {
+        under = ev_to_raw(- (raw_info.dynamic_range - (zebra_raw_underexposure - 1) * 100) / 100.0);
+        under >>= level_shift;
+        under = COERCE(under, 0, white - 1);
+    }
+
+    int off = get_y_skip_offset_for_overlays();
+
+    for (int yb = os.y0 + off; yb < os.y_max - off - 1; yb += 2)
+    {
+        int yr = BM2RAW_Y(yb);
+
+        for (int xb = os.x0; xb < os.x_max - 7; xb += 8)
+        {
+            int xr = BM2RAW_X(xb);
+
+            uint32_t color0 = 0;
+            uint32_t color1 = 0;
+
+            if (xr >= raw_info.active_area.x1 &&
+                xr <  raw_info.active_area.x2 &&
+                yr >= raw_info.active_area.y1 &&
+                yr <  raw_info.active_area.y2)
+            {
+                int hi = m6ii_raw_zebra_block_max(xr, yr);
+                int lo = under ? m6ii_raw_zebra_block_min(xr, yr) : white;
+
+                if (hi >= white)
+                {
+                    color0 = zebra_color_word_row(COLOR_RED, yb);
+                    color1 = zebra_color_word_row(COLOR_RED, yb + 1);
+                }
+                else if (under && lo <= under)
+                {
+                    color0 = zebra_color_word_row(COLOR_BLUE, yb);
+                    color1 = zebra_color_word_row(COLOR_BLUE, yb + 1);
+                }
+            }
+
+            m6ii_raw_zebra_write4(bvram, mirror, xb,     yb,     color0);
+            m6ii_raw_zebra_write4(bvram, mirror, xb + 4, yb,     color0);
+            m6ii_raw_zebra_write4(bvram, mirror, xb,     yb + 1, color1);
+            m6ii_raw_zebra_write4(bvram, mirror, xb + 4, yb + 1, color1);
+        }
+    }
+
+    ml_refresh_display_needed = 1;
+}
+#endif
 
 static void FAST draw_zebras_raw()
 {
@@ -1164,14 +1356,26 @@ static int zebra_digic_dirty = 0;
 static void draw_zebras( int Z )
 {
     uint8_t * const bvram = bmp_vram_real();
+
+    #ifdef CONFIG_M6II
+    int mlv_busy = mlv_lite_raw_recording_state() != 0;
+    int zd = Z && zebra_draw && (lv || PLAY_OR_QR_MODE) && NOT_RECORDING && !mlv_busy;
+    #else
     int zd = Z && zebra_draw && (lv_luma_is_accurate() || PLAY_OR_QR_MODE) && (zebra_rec || NOT_RECORDING); // when to draw zebras
+    #endif
+
     if (zd)
     {
         #ifdef FEATURE_RAW_ZEBRAS
         if (RAW_ZEBRA_ENABLE && can_use_raw_overlays())
         {
+            #ifdef CONFIG_M6II
+            if (lv) draw_zebras_raw_lv_m6ii();
+            else draw_zebras_raw();
+            #else
             if (lv) draw_zebras_raw_lv();
             else draw_zebras_raw();
+            #endif
             return;
         }
         #endif
@@ -1965,7 +2169,11 @@ static MENU_UPDATE_FUNC(zebra_draw_display)
     if (z && can_use_raw_overlays_menu())
     {
         raw_zebra_update(entry, info);
+        #ifdef CONFIG_M6II
+        if (RAW_ZEBRA_ENABLE) MENU_SET_VALUE("RAW");
+        #else
         if (RAW_ZEBRA_ENABLE) MENU_SET_VALUE("RAW RGB");
+        #endif
     }
     #endif
 }
@@ -3005,6 +3213,16 @@ struct menu_entry zebra_menus[] = {
     },
     #endif
     #ifdef FEATURE_HISTOGRAM
+    #ifdef CONFIG_M6II
+    {
+        .name = "RAW Histogram",
+        .priv = &hist_draw,
+        .max = 1,
+        .update = raw_histo_update,
+        .help = "Show an RGB histogram computed directly from LiveView RAW data.",
+        .depends_on = DEP_GLOBAL_DRAW,
+    },
+    #else
     {
         .name = "Histogram",
         .priv       = &hist_draw,
@@ -3064,6 +3282,8 @@ struct menu_entry zebra_menus[] = {
             MENU_EOL
         },
     },
+
+    #endif
     #endif
     #ifdef FEATURE_WAVEFORM
     {
@@ -3547,7 +3767,27 @@ static void draw_zoom_overlay(int dirty)
 
 int liveview_display_idle()
 {
-// Common conditions required across all generations
+#ifdef CONFIG_M6II
+    /*
+     * M6 II normal LiveView does not satisfy several legacy state tests during
+     * cold startup (notably job/gui state). Those values become normalized by
+     * later Canon UI activity, which is why entering/exiting a menu appeared to
+     * "fix" zebras.
+     *
+     * For this port, use the state that actually identifies usable LiveView:
+     * display on, LV running, no ML menu/dialog takeover, and a live LvApp.
+     */
+    if (!DISPLAY_IS_ON ||
+        !LV_NON_PAUSED ||
+        menu_active_and_not_hidden())
+    {
+        return 0;
+    }
+
+    extern struct dialog* LiveViewApp_dialog;
+    return LiveViewApp_dialog != 0;
+#else
+// Common conditions required across other generations
     if( !DISPLAY_IS_ON
         || !LV_NON_PAUSED
         || !job_state_ready_to_take_pic()
@@ -3611,6 +3851,7 @@ int liveview_display_idle()
             || dialog->handler == (dialog_handler_t) &LiveViewShutterApp_handler
             #endif
         );
+#endif
 #endif
 }
 
@@ -3704,6 +3945,24 @@ BMP_LOCK(
 }
 #endif
 
+#ifdef CONFIG_M6II
+static void m6ii_clear_raw_histogram_overlay(void)
+{
+#ifdef FEATURE_HISTOGRAM
+    if (!hist_draw)
+        return;
+
+    int hist_bottom_limit = get_ml_bottombar_pos();
+    int hist_y = MAX(os.y0 + 1, hist_bottom_limit - hist_height - 2);
+    int hist_x = os.x_max - HIST_WIDTH - 5;
+
+    bmp_fill(COLOR_EMPTY,
+             hist_x - 2, hist_y - 2,
+             HIST_WIDTH + 4, hist_height + 4);
+#endif
+}
+#endif
+
 int should_draw_bottom_graphs()
 {
     if (!lv) return 0;
@@ -3715,6 +3974,11 @@ int should_draw_bottom_graphs()
 
 void draw_histogram_and_waveform(int allow_play)
 {
+#ifdef CONFIG_M6II
+    /* MLV owns the screen/RAW path from PREPARING until it returns to IDLE. */
+    if (mlv_lite_raw_recording_state() != 0 || RECORDING)
+        return;
+#endif
 
     if (menu_active_and_not_hidden()) return;
     if (!get_global_draw()) return;
@@ -3752,6 +4016,15 @@ void draw_histogram_and_waveform(int allow_play)
             BMP_LOCK( hist_draw_image( os.x0 + 500,  1); )
         else
         #endif
+#ifdef CONFIG_M6II
+        if (lv && histogram.is_raw)
+        {
+            int hist_bottom_limit = get_ml_bottombar_pos();
+            int hist_y = MAX(os.y0 + 1, hist_bottom_limit - hist_height - 2);
+            BMP_LOCK( hist_draw_image(os.x_max - HIST_WIDTH - 5, hist_y); )
+        }
+        else
+#endif
         if (should_draw_bottom_graphs())
             BMP_LOCK( hist_draw_image( os.x0 + 50,  480 - hist_height - 1); )
         else if (console_visible)
@@ -4044,7 +4317,16 @@ void update_lv_fps() // to be called every 10 seconds
 static void
 livev_hipriority_task( void* unused )
 {
+#ifdef CONFIG_M6II
+    /* Start M6 II overlays as soon as ML initialization completes. */
+    {
+        extern int ml_started;
+        while (!ml_started)
+            msleep(20);
+    }
+#else
     msleep(1000);
+#endif
     
     #ifdef FEATURE_CROPMARKS
     find_cropmarks();
@@ -4053,6 +4335,24 @@ livev_hipriority_task( void* unused )
     #ifdef FEATURE_LV_DISPLAY_PRESETS
     update_disp_mode_bits_from_params();
     #endif
+
+#ifdef CONFIG_M6II
+    /* Establish a fresh overlay frame when ML starts in active LiveView. */
+    {
+        if (lv && DISPLAY_IS_ON)
+        {
+            BMP_LOCK(
+                clrscr_mirror();
+                clrscr();
+            )
+            redraw();
+            bmp_on();
+            vram_params_set_dirty();
+            crop_set_dirty(10);
+            ml_refresh_display_needed = 1;
+        }
+    }
+#endif
     
     TASK_LOOP
     {
@@ -4064,13 +4364,37 @@ livev_hipriority_task( void* unused )
             msleep(100);
         }
 
+        #ifdef CONFIG_M6II
+        int zd = zebra_draw && (lv || PLAY_OR_QR_MODE) && NOT_RECORDING &&
+                 mlv_lite_raw_recording_state() == 0;
+        #else
         int zd = zebra_draw && (lv_luma_is_accurate() || PLAY_OR_QR_MODE) && (zebra_rec || NOT_RECORDING); // when to draw zebras (should match the one from draw_zebra_and_focus)
+        #endif
         if (!zd) digic_zebra_cleanup();
         
 #ifdef CONFIG_RAW_LIVEVIEW
         static int raw_flag = 0;
 #endif
-        
+
+        #ifdef CONFIG_M6II
+        /* Clear transient zebra and RAW histogram pixels during REC or zoom. */
+        static int m6ii_prev_overlay_blocked = 0;
+        int m6ii_overlay_blocked =
+            RECORDING ||
+            mlv_lite_raw_recording_state() != 0 ||
+            (lv && lv_dispsize != 1);
+
+        if (m6ii_overlay_blocked && !m6ii_prev_overlay_blocked)
+        {
+            BMP_LOCK(
+                clrscr_mirror();
+                m6ii_clear_raw_histogram_overlay();
+            )
+            ml_refresh_display_needed = 1;
+        }
+        m6ii_prev_overlay_blocked = m6ii_overlay_blocked;
+        #endif
+
         if (!zebra_should_run())
         {
             while (clearscreen == 1 && (get_halfshutter_pressed() || dofpreview)) msleep(100);
@@ -4110,6 +4434,20 @@ livev_hipriority_task( void* unused )
         #ifdef CONFIG_RAW_LIVEVIEW
         int raw_needed = 0;
 
+        #ifdef CONFIG_M6II
+        if (lv && lv_dispsize == 1 && NOT_RECORDING &&
+            mlv_lite_raw_recording_state() == 0)
+        {
+            #if defined(FEATURE_RAW_ZEBRAS)
+            if (zebra_draw && raw_zebra_enable == 1)
+                raw_needed = 1;
+            #endif
+            #if defined(FEATURE_HISTOGRAM) && defined(FEATURE_RAW_HISTOGRAM)
+            if (RAW_HISTOGRAM_ENABLED)
+                raw_needed = 1;
+            #endif
+        }
+        #else
         /* if picture quality is raw, switch the LiveView to raw mode (photo, zoom 1x) */
         int raw = pic_quality & 0x60000;
         if (raw && lv_dispsize == 1 && !is_movie_mode())
@@ -4126,13 +4464,19 @@ livev_hipriority_task( void* unused )
             #endif
             if (spotmeter_draw && spotmeter_formula == 3) raw_needed = 1;   /* spotmeter, units: raw */
         }
+        #endif
 
         if (!raw_flag && raw_needed)
         {
             /* do we need any raw overlays? enable LV raw mode if we don't already have it */
             raw_lv_request();
             raw_flag = 1;
+#ifdef CONFIG_M6II
+            vram_params_set_dirty();
+            ml_refresh_display_needed = 1;
+#endif
         }
+
         if (raw_flag && !raw_needed)
         {
             /* if we no longer need raw overlays, keep LiveView in normal mode (it does less stuff) */
@@ -4261,16 +4605,12 @@ livev_lopriority_task( void* unused )
     TASK_LOOP
     {
         #if defined(LV_OVERLAYS_MODE) && defined(CONFIG_COMPOSITOR_DEDICATED_LAYER)
-        // Monitor overlays mode and clear screen if needed
-        // Existing code counts on Canon to overdraw screen.
-        if( (last_lv_overlays_mode == 3) &&
-            (LV_OVERLAYS_MODE != last_lv_overlays_mode ) &&
-            liveview_display_idle() )
+        // React immediately when INFO toggles Canon/ML overlays.
+        if (LV_OVERLAYS_MODE != last_lv_overlays_mode && liveview_display_idle())
         {
-            //DryosDebugMsg(0, 15, "clear overlay %d", LV_OVERLAYS_MODE);
-            clrscr();
+            if (LV_OVERLAYS_MODE == 3) BMP_LOCK( update_lens_display(1,1); )
+            else clrscr();
         }
-        // update last overlays state
         last_lv_overlays_mode = LV_OVERLAYS_MODE;
         #endif
 

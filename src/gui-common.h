@@ -317,6 +317,7 @@ int handle_keep_ml_after_format_toggle(struct event * event);
 
 void check_pre_shutdown_flag();
 void reset_pre_shutdown_flag_step();
+int gui_shutdown_in_progress();
 
 char* get_info_button_name();
 

@@ -374,6 +374,7 @@ void menu_redraw();
 
 /* should be obsolete, need to double-check */
 void menu_set_dirty();
+void menu_move_entry_to_end(const char *menu_name, const char *entry_name);
 
 /* returns true if the specified tab is selected in menu (but menu itself may not be visible) */
 int is_menu_selected(char* menu_name);
