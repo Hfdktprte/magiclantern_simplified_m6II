@@ -634,7 +634,10 @@ struct audio_level
 static inline int16_t
 audio_read_level( int channel )
 {
-        #if defined(CONFIG_DIGIC_8X)
+        #if defined(CONFIG_M6II)
+        extern int16_t m6ii_audio_read_level(int channel);
+        return m6ii_audio_read_level(channel);
+        #elif defined(CONFIG_DIGIC_8X)
         // crashes on DIGIC 8+, untested but doesn't crash on D67
         return 0;
         #endif
