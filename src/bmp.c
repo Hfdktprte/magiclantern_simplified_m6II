@@ -139,6 +139,18 @@ void ml_refresh_display_resume(void)
     ml_refresh_display_paused = 0;
 }
 
+void *rgba_buffer_visible(void)
+{
+#ifdef FEATURE_VRAM_RGBA
+    if (!rgb_vram_info)
+        return NULL;
+
+    return (uint32_t *)rgb_vram_info->bitmap_data + BMP_HDMI_OFFSET;
+#else
+    return NULL;
+#endif
+}
+
 /** Returns a pointer to currently selected BMP vram (real or mirror) */
 uint8_t * bmp_vram(void)
 {
@@ -291,6 +303,60 @@ void refresh_yuv_from_rgb(void)
     ml_refresh_display_active = 0;
 }
 
+void rgba_buffer_present(void)
+{
+#ifdef FEATURE_VRAM_RGBA
+#ifdef CONFIG_DIGIC_VI
+    XimrExe((void *)XIMR_CONTEXT);
+#else
+    take_semaphore(winsys_sem, 0);
+    XimrExe((void *)XIMR_CONTEXT);
+    give_semaphore(winsys_sem);
+#endif
+    ml_refresh_display_needed = 0;
+#endif
+}
+
+void rgba_buffer_composite_overlay_region(int x, int y, int width, int height)
+{
+#ifdef FEATURE_VRAM_RGBA
+    if (!rgb_vram_info || !bmp_vram_indexed)
+        return;
+
+    x = COERCE(x, 0, 719);
+    y = COERCE(y, 0, 479);
+    width = COERCE(width, 0, 720 - x);
+    height = COERCE(height, 0, 480 - y);
+
+    uint8_t *src = bmp_vram();
+    uint32_t *dst = (uint32_t *)rgb_vram_info->bitmap_data + BMP_HDMI_OFFSET;
+
+    for (int row = 0; row < height; row++)
+    {
+        uint8_t *s = src + (y + row) * BMPPITCH + x;
+        uint32_t *d = dst + (y + row) * BMPPITCH + x;
+
+        for (int col = 0; col < width; col++)
+        {
+            uint8_t color = s[col];
+            if (color != COLOR_EMPTY)
+                d[col] = indexed2rgb(color);
+        }
+    }
+#endif
+}
+
+void rgba_buffer_present_overlay_region(int x, int y, int width, int height)
+{
+    rgba_buffer_composite_overlay_region(x, y, width, height);
+    rgba_buffer_present();
+}
+
+void rgba_buffer_present_overlay(int width, int height)
+{
+    rgba_buffer_present_overlay_region(0, 0, width, height);
+}
+
 void rgba_buffer_clear()
 {
     if (rgb_vram_info == NULL) return;
@@ -383,26 +449,6 @@ uint32_t indexed2rgb(uint8_t color)
     if (color < RGB_LUT_SIZE)
     {
         return indexed2rgbLUT[color];
-    }
-    else if (color >= COLOR_PREVIEW_RGB_BASE &&
-             color < COLOR_PREVIEW_RGB_BASE + COLOR_PREVIEW_RGB_COUNT)
-    {
-        /*
-         * Decode the compact 5x6x5 preview cube reserved in bmp.h.
-         * Keeping these colors outside the traditional ML palette means
-         * existing OSD colors and grayscale entries remain unchanged.
-         */
-        uint32_t v = color - COLOR_PREVIEW_RGB_BASE;
-        uint32_t bq = v % COLOR_PREVIEW_RGB_B_LEVELS;
-        v /= COLOR_PREVIEW_RGB_B_LEVELS;
-        uint32_t gq = v % COLOR_PREVIEW_RGB_G_LEVELS;
-        uint32_t rq = v / COLOR_PREVIEW_RGB_G_LEVELS;
-
-        uint32_t r = rq * 255 / (COLOR_PREVIEW_RGB_R_LEVELS - 1);
-        uint32_t g = gq * 255 / (COLOR_PREVIEW_RGB_G_LEVELS - 1);
-        uint32_t b = bq * 255 / (COLOR_PREVIEW_RGB_B_LEVELS - 1);
-
-        return 0xff000000 | (r << 16) | (g << 8) | b;
     }
     else
     {

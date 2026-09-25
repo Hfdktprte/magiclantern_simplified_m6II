@@ -43,6 +43,11 @@ extern uint32_t ml_refresh_display_needed;
  */
 void ml_refresh_display_pause(void);
 void ml_refresh_display_resume(void);
+void *rgba_buffer_visible(void);
+void rgba_buffer_present(void);
+void rgba_buffer_composite_overlay_region(int x, int y, int width, int height);
+void rgba_buffer_present_overlay(int width, int height);
+void rgba_buffer_present_overlay_region(int x, int y, int width, int height);
 
 /** Returns a pointer to the real BMP vram (or to idle BMP vram) */
 uint8_t * bmp_vram(void);
@@ -377,31 +382,6 @@ void bmp_draw_rect_chamfer(int color, int x0, int y0, int w, int h, int a, int t
 #define COLOR_ALMOST_WHITE      0x4F
 
 #define COLOR_GRAY(percent) (38 + (percent) * 41 / 100) // e.g. COLOR_GRAY(50) is 50% gray
-
-/*
- * Indexed RGB preview colors.
- *
- * FEATURE_VRAM_RGBA cameras translate the 8-bit ML bitmap buffer through
- * indexed2rgb().  Indices 80+ were previously unspecified, so reserve a
- * compact 5x6x5 RGB cube there for image previews that need real color while
- * still sharing the normal ML overlay layer.
- */
-#define COLOR_PREVIEW_RGB_BASE       80
-#define COLOR_PREVIEW_RGB_R_LEVELS    5
-#define COLOR_PREVIEW_RGB_G_LEVELS    6
-#define COLOR_PREVIEW_RGB_B_LEVELS    5
-#define COLOR_PREVIEW_RGB_COUNT      (COLOR_PREVIEW_RGB_R_LEVELS * COLOR_PREVIEW_RGB_G_LEVELS * COLOR_PREVIEW_RGB_B_LEVELS)
-
-static inline uint8_t color_preview_rgb(uint8_t r, uint8_t g, uint8_t b)
-{
-    uint32_t rq = ((uint32_t) r * (COLOR_PREVIEW_RGB_R_LEVELS - 1) + 127) / 255;
-    uint32_t gq = ((uint32_t) g * (COLOR_PREVIEW_RGB_G_LEVELS - 1) + 127) / 255;
-    uint32_t bq = ((uint32_t) b * (COLOR_PREVIEW_RGB_B_LEVELS - 1) + 127) / 255;
-
-    return COLOR_PREVIEW_RGB_BASE +
-           (rq * COLOR_PREVIEW_RGB_G_LEVELS + gq) * COLOR_PREVIEW_RGB_B_LEVELS +
-           bq;
-}
 
 #define COLOR_DARK_GREEN1_MOD 21
 #define COLOR_DARK_GREEN2_MOD 22
