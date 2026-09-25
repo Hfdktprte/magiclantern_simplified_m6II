@@ -89,6 +89,9 @@ static void m6ii_hist_prepare_smooth_display(void)
 #endif
 
 #ifdef CONFIG_M6II
+static int(*mlv_lite_raw_histogram_region)(int *, int *, int *, int *) =
+    MODULE_FUNCTION(mlv_lite_raw_histogram_region);
+
 /*
  * M6 II RAW LiveView may be packed at 10, 12 or 14 bits. The generic
  * raw_*_pixel helpers assume Canon's legacy 14-bit raw_pixblock layout, so
@@ -147,6 +150,8 @@ void FAST hist_build_raw()
         return;
 
     int to_14bit = 14 - bpp;
+    int roi_x, roi_y, roi_w, roi_h;
+    int roi_active = mlv_lite_raw_histogram_region(&roi_x, &roi_y, &roi_w, &roi_h);
 
     for (int i = os.y0; i < os.y_max; i += step)
     {
@@ -172,6 +177,11 @@ void FAST hist_build_raw()
              */
             int bx = x & ~1;
             int by = y & ~1;
+
+            if (roi_active &&
+                (bx < roi_x || by < roi_y ||
+                 bx + 1 >= roi_x + roi_w || by + 1 >= roi_y + roi_h))
+                continue;
 
             if (bx + 1 >= raw_info.width || by + 1 >= raw_info.height)
                 continue;

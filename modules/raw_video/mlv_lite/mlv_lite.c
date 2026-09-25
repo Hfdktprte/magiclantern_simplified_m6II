@@ -385,6 +385,25 @@ static GUARDED_BY(RawRecTask)   uint64_t mlv_start_timestamp = 0;
 
 static int raw_rec_should_preview(void);
 
+int mlv_lite_raw_histogram_region(int *x, int *y, int *w, int *h)
+{
+    int sx = skip_x;
+    int sy = skip_y;
+    int rx = res_x;
+    int ry = res_y;
+
+    if (!raw_video_enabled || !lv || !is_movie_mode() ||
+        lv_dispsize > 1 || raw_rec_should_preview() ||
+        rx <= 0 || ry <= 0 || !x || !y || !w || !h)
+        return 0;
+
+    *x = sx;
+    *y = sy;
+    *w = rx;
+    *h = ry;
+    return 1;
+}
+
 /* old mlv_rec interface stuff here */
 struct msg_queue *mlv_block_queue = NULL;
 /* registry of all other modules CBRs */
