@@ -3190,6 +3190,12 @@ void init_mlv_chunk_headers(struct raw_info *raw_info)
     rawi_hdr.raw_info.white_level = (white14 + bpp_scaling/2) / bpp_scaling;
 
     mlv_fill_idnt(&idnt_hdr, mlv_start_timestamp);
+    if (cam_m6ii)
+    {
+        idnt_hdr.cameraModel = 0x00000811;
+        memset(idnt_hdr.cameraName, 0, sizeof(idnt_hdr.cameraName));
+        memcpy(idnt_hdr.cameraName, "Canon EOS M6 Mark II", sizeof("Canon EOS M6 Mark II"));
+    }
     mlv_fill_expo(&expo_hdr, mlv_start_timestamp);
     mlv_fill_lens(&lens_hdr, mlv_start_timestamp);
     mlv_fill_rtci(&rtci_hdr, mlv_start_timestamp);
