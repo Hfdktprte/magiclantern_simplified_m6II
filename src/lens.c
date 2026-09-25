@@ -3211,9 +3211,11 @@ static LVINFO_UPDATE_FUNC(iso_update)
 
         if (raw_lv_is_enabled())
         {
+#ifndef CONFIG_M6II
             /* the only ISOs used are the full-stop ones;
              * digital gain is only applied to display, not recorded */
             iso_equiv_raw = (lv_iso+3)/8*8;
+#endif
             item->color_fg = COLOR_WHITE;
         }
         
