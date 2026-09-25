@@ -167,6 +167,19 @@ static int show_lv_fps = 0; // for debugging
 CONFIG_INT("lv.disp.profiles", disp_profiles_0, 0);
 
 static CONFIG_INT("disp.mode", disp_mode, 0);
+
+#ifdef CONFIG_M6II
+static CONFIG_INT("video.hide_overlays", hide_overlays, 0);
+#endif
+
+int hide_overlays_while_recording()
+{
+#ifdef CONFIG_M6II
+    return hide_overlays && RECORDING;
+#else
+    return 0;
+#endif
+}
 static CONFIG_INT("disp.mode.a", disp_mode_a, 1);
 static CONFIG_INT("disp.mode.b", disp_mode_b, 1);
 static CONFIG_INT("disp.mode.c", disp_mode_c, 1);
@@ -2885,6 +2898,19 @@ int handle_transparent_overlay(struct event * event)
 
 static CONFIG_INT("electronic.level", electronic_level, 0);
 
+#ifdef CONFIG_M6II
+static struct menu_entry video_overlay_menus[] = {
+    {
+        .name = "Hide overlays",
+        .priv = &hide_overlays,
+        .max = 1,
+        .choices = (const char *[]) {"Off", "Recording"},
+        .help = "Hide ML overlays while recording. The MLV Lite framing border remains visible.",
+        .depends_on = DEP_MOVIE_MODE,
+    },
+};
+#endif
+
 struct menu_entry zebra_menus[] = {
     #ifdef FEATURE_GLOBAL_DRAW
     {
@@ -4087,6 +4113,20 @@ clearscreen_loop:
         idle_led_blink_step(k);
 
         if (!lv && !lv_paused) continue;
+
+#ifdef CONFIG_M6II
+        static int hide_overlays_prev = 0;
+        int hide_overlays_now = hide_overlays_while_recording();
+        if (hide_overlays_now != hide_overlays_prev)
+        {
+            BMP_LOCK(
+                clrscr_mirror();
+                clrscr();
+            )
+            crop_set_dirty(1);
+            hide_overlays_prev = hide_overlays_now;
+        }
+#endif
         
         #ifdef FEATURE_CLEAR_OVERLAYS
         if (clearscreen == 3)
@@ -4485,10 +4525,16 @@ livev_hipriority_task( void* unused )
         }
         #endif
 
-        int mz = should_draw_zoom_overlay();
+        int mz = hide_overlays_while_recording() ? 0 : should_draw_zoom_overlay();
 
         _lv_vsync(mz);
         guess_fastrefresh_direction();
+
+        if (hide_overlays_while_recording())
+        {
+            msleep(100);
+            continue;
+        }
 
         #ifdef FEATURE_MAGIC_ZOOM
         if (mz)
@@ -4636,6 +4682,8 @@ livev_lopriority_task( void* unused )
         #endif
 
         loprio_sleep();
+        if (hide_overlays_while_recording())
+            continue;
         if (!zebra_should_run())
         {
             if (WAVEFORM_FULLSCREEN && liveview_display_idle() && get_global_draw() && !is_zoom_mode_so_no_zebras() && !gui_menu_shown())
@@ -4871,6 +4919,9 @@ static void zebra_init()
 {
     precompute_yuv2rgb();
     menu_add( "Overlay", zebra_menus, COUNT(zebra_menus) );
+#ifdef CONFIG_M6II
+    menu_add( "Movie", video_overlay_menus, COUNT(video_overlay_menus) );
+#endif
     menu_add( "Debug", livev_dbg_menus, COUNT(livev_dbg_menus) );
     //~ menu_add( "Movie", movie_menus, COUNT(movie_menus) );
     //~ menu_add( "Config", cfg_menus, COUNT(cfg_menus) );

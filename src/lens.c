@@ -489,6 +489,7 @@ int FAST get_ml_bottombar_pos()
 
 void draw_ml_bottombar()
 {
+    if (hide_overlays_while_recording()) return;
     if (!should_draw_bottom_bar()) return;
 
     lvinfo_display(0,1);
@@ -672,6 +673,7 @@ void free_space_show_photomode()
 
 void draw_ml_topbar()
 {
+    if (hide_overlays_while_recording()) return;
     if (!get_global_draw()) return;
     
     lvinfo_display(1,0);

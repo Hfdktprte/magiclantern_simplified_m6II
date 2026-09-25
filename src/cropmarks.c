@@ -328,6 +328,20 @@ cropmark_draw()
 
     reload_cropmark(); // reloads only when changed
 
+    if (hide_overlays_while_recording())
+    {
+        if (cropmarks_frame_changed())
+            cropmarks_clear_last_frame();
+
+        bvram_mirror_clear();
+        cropmarks_draw_frame();
+        cropmarks_frame_save();
+        cropmark_cache_dirty = 1;
+        zoom_overlay_dirty = 1;
+        crop_dirty = 0;
+        return;
+    }
+
     if (cropmarks_frame_changed())
     {
         cropmarks_clear_last_frame();

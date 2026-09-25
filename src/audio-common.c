@@ -353,6 +353,9 @@ static int audio_meter_width = INT_MIN;
 static int audio_meters_are_drawn_common()
 {
 #ifdef FEATURE_AUDIO_METERS
+    if (hide_overlays_while_recording())
+        return 0;
+
     if (!sound_recording_enabled())
         return 0;
         

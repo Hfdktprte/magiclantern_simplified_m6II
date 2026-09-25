@@ -1986,7 +1986,11 @@ void show_recording_status()
     /* Determine if we should redraw */
     if (!RAW_IS_IDLE && liveview_display_idle())
     {
-        switch (indicator_display)
+        int display = hide_overlays_while_recording() && RAW_IS_RECORDING
+            ? INDICATOR_ON_SCREEN
+            : indicator_display;
+
+        switch (display)
         {
             case INDICATOR_IN_LVINFO:
                 /* If displaying in the info bar, force a refresh */
