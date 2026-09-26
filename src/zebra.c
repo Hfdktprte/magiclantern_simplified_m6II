@@ -3341,6 +3341,21 @@ struct menu_entry zebra_menus[] = {
         .max  = 1, 
         .help = "Electronic level indicator in 0.5 degree steps.",
         .depends_on = DEP_GLOBAL_DRAW,
+        .children = (struct menu_entry[]) {
+            {
+                .name = "Display",
+                .priv = &electronic_level_mode,
+                .max = 2,
+                .choices = (const char *[]) {"Tilt Only", "Roll Only", "Both"},
+            },
+            {
+                .name = "Line Thickness",
+                .priv = &electronic_level_thickness,
+                .max = 1,
+                .choices = (const char *[]) {"Slim", "Thicker"},
+            },
+            MENU_EOL
+        },
     },
     #endif
 };

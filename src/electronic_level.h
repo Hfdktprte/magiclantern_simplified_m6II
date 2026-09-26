@@ -10,5 +10,7 @@ void disable_electronic_level();
  * @brief enable gyro data updating and display current levels
  */
 void show_electronic_level();
+extern int electronic_level_mode;
+extern int electronic_level_thickness;
 
 #endif

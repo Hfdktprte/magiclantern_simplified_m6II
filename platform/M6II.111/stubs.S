@@ -218,6 +218,10 @@ THUMB_FN(0xe0134dfa, GetRearTemperature)
 THUMB_FN(0xe02df628, GetAudioLevel) // AudioDS raw level getter; returns device-off cleanly
 THUMB_FN(0xe07e0f38, GUI_GetOlcTvForApex)   // ROM: Tv table 0xE1482ED0
 THUMB_FN(0xe07e1174, GUI_GetOlcIsoForApex)  // ROM: ISO table 0xE1483998
+THUMB_FN(0xe0570c3a, GUI_SetRollingPitchingLevelStatus)
+THUMB_FN(0xe0570c82, GUI_GetRollingPitchingLevelStatus)
+THUMB_FN(0xe0570c9e, GUI_GetRollingPitchingLevelRoll)
+THUMB_FN(0xe0570cb4, GUI_GetRollingPitchingLevelPitch)
 
 /* M6 II 1.1.1 ROM: native LiveView zoom accessors.
  * GUI_SetLvDispSizeValue validates 1/5/10/0x81/0x85/0x8a and sends the

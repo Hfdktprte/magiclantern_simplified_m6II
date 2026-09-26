@@ -28,6 +28,7 @@
 
 // enable global draw
 #define FEATURE_GLOBAL_DRAW
+#define FEATURE_LEVEL_INDICATOR
 #define FEATURE_AUDIO_METERS
 #define FEATURE_ZEBRA
 #define FEATURE_CROPMARKS

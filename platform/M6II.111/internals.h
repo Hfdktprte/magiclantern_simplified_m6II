@@ -22,6 +22,7 @@
 
 /* has LV */
 #define CONFIG_LIVEVIEW
+#define CONFIG_ELECTRONIC_LEVEL
 
 /* hooking EFV_STATE ends with EvfCap crashes, requires investigation */
 #define CONFIG_STATE_OBJECT_HOOKS
