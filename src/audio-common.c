@@ -1,4 +1,5 @@
 #include "dryos.h"
+#include "bmp.h"
 #include "lvinfo.h"
 #include "module.h"
 #include "raw.h"
@@ -132,10 +133,6 @@ static struct audio_level audio_levels[2];
 int16_t m6ii_audio_read_level(int channel)
 {
     volatile uint32_t *aproc = (volatile uint32_t *)0xD8000000;
-    /* Canon names these registers level_meter_wait and Level_l/Level_r.
-     * Keep ML's original meter code; only make the hardware meter update fast. */
-    if (aproc[0x1B0 / 4] > 1)
-        aproc[0x1B0 / 4] = 1;
     uint32_t v = aproc[(channel & 1 ? 0x220 : 0x21C) / 4];
     return (int16_t)(v & 0xFFFF);
 }
@@ -398,6 +395,15 @@ static void draw_meters(void)
     draw_ticks( x0, y0 + 10, 2, width);
 #if !(defined(CONFIG_500D) || defined(CONFIG_1100D))         // mono mic on 500d and 1100d
     draw_meter( x0, y0 + 12, 10, &audio_levels[1], right_label, width);
+#endif
+
+#ifdef CONFIG_M6II
+    rgba_buffer_present_overlay_region(
+        x0,
+        y0,
+        width + AUDIO_METER_OFFSET * 4,
+        fontspec_height(FONT_SMALL) * 2
+    );
 #endif
 
 #ifndef CONFIG_M6II
