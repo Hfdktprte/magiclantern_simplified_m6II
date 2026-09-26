@@ -374,11 +374,25 @@ cropmark_draw()
         if (!lv) msleep(500); // let the bitmap buffer settle, otherwise ML may see black image and not draw anything (or draw half of cropmark)
         clrscr_mirror(); // clean any remaining zebras / peaking
         cropmark_cache_update_signature();
-        bvram_mirror_clear();
+        if (cropmarks_x != -1 && cropmarks_y != -1)
+        {
+            default_movie_cropmarks();
+            cropmark_draw_from_cache();
+        }
+        else
+            bvram_mirror_clear();
 
         if (hdmi_code >= 5 && is_pure_play_movie_mode())
         {   // exception: cropmarks will have some parts of them outside the screen
             bmp_draw_scaled_ex(cropmarks, BMP_W_MINUS+1, BMP_H_MINUS - 50, 960, 640, bvram_mirror);
+        }
+        else if (cropmarks_x != -1 && cropmarks_y != -1)
+        {
+            int x1 = cropmarks_x >> 16;
+            int x2 = cropmarks_x & 0xFFFF;
+            int y1 = cropmarks_y >> 16;
+            int y2 = cropmarks_y & 0xFFFF;
+            bmp_draw_scaled_ex(cropmarks, x1, y1, x2-x1, y2-y1, bvram_mirror);
         }
         else
             bmp_draw_scaled_ex(cropmarks, os.x0, os.y0, os.x_ex, os.y_ex, bvram_mirror);
@@ -409,7 +423,7 @@ static int cropmark_cache_get_signature()
         (
             should_use_default_cropmarks() 
                 ? (cropmarks_x * 1601 + cropmarks_y * 481)          /* default cropmarks: they get burned in the bvram mirror */
-                : (crop_index * 13579 + crop_enabled * 14567)       /* bitmap cropmarks: only the bitmap gets burned in the bvram mirror */
+                : (crop_index * 13579 + crop_enabled * 14567 + cropmarks_x * 1601 + cropmarks_y * 481)
         )
         + (hdmi_code + EXT_MONITOR_RCA) * 315 +                     /* force redraw when changing display type (LCD, HDMI, SD) */
         os.x0*811 + os.y0*467 + os.x_ex*571 + os.y_ex*487 +         /* force redraw when bitmap parameters changed */
