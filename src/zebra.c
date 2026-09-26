@@ -170,6 +170,7 @@ static CONFIG_INT("disp.mode", disp_mode, 0);
 
 #ifdef CONFIG_M6II
 static CONFIG_INT("video.hide_overlays", hide_overlays, 0);
+static CONFIG_INT("video.recording_overlay_mode", recording_overlay_mode, 0);
 #endif
 
 int hide_overlays_while_recording()
@@ -180,6 +181,52 @@ int hide_overlays_while_recording()
     return 0;
 #endif
 }
+
+static int recording_overlay_show_border()
+{
+#ifdef CONFIG_M6II
+    return hide_overlays_while_recording() && recording_overlay_mode >= 1;
+#else
+    return 0;
+#endif
+}
+
+static int recording_overlay_show_level()
+{
+#ifdef CONFIG_M6II
+    return hide_overlays_while_recording() && recording_overlay_mode >= 2;
+#else
+    return 0;
+#endif
+}
+
+static int recording_overlay_show_cropmarks()
+{
+#ifdef CONFIG_M6II
+    return hide_overlays_while_recording() && recording_overlay_mode >= 3;
+#else
+    return 0;
+#endif
+}
+
+#ifdef CONFIG_M6II
+static MENU_UPDATE_FUNC(hide_overlays_display)
+{
+    if (!hide_overlays)
+    {
+        MENU_SET_VALUE("Off");
+        return;
+    }
+
+    MENU_SET_VALUE(
+        "%s",
+        recording_overlay_mode == 0 ? "Clear All" :
+        recording_overlay_mode == 1 ? "Border" :
+        recording_overlay_mode == 2 ? "Border + Level" :
+        "Border + Level + Cropmarks"
+    );
+}
+#endif
 static CONFIG_INT("disp.mode.a", disp_mode_a, 1);
 static CONFIG_INT("disp.mode.b", disp_mode_b, 1);
 static CONFIG_INT("disp.mode.c", disp_mode_c, 1);
@@ -2905,8 +2952,23 @@ static struct menu_entry video_overlay_menus[] = {
         .priv = &hide_overlays,
         .max = 1,
         .choices = (const char *[]) {"Off", "Recording"},
-        .help = "Hide ML overlays while recording. The MLV Lite framing border remains visible.",
+        .update = hide_overlays_display,
+        .help = "Choose which ML overlays remain visible while recording.",
         .depends_on = DEP_MOVIE_MODE,
+        .children = (struct menu_entry[]) {
+            {
+                .name = "Recording Display",
+                .priv = &recording_overlay_mode,
+                .max = 3,
+                .choices = (const char *[]) {
+                    "Clear All",
+                    "Border",
+                    "Border + Level",
+                    "Border + Level + Cropmarks"
+                },
+            },
+            MENU_EOL
+        },
     },
 };
 #endif
@@ -4130,16 +4192,23 @@ clearscreen_loop:
         if (!lv && !lv_paused) continue;
 
 #ifdef CONFIG_M6II
-        static int hide_overlays_prev = 0;
-        int hide_overlays_now = hide_overlays_while_recording();
-        if (hide_overlays_now != hide_overlays_prev)
+        static int recording_overlay_prev = -1;
+        int recording_overlay_now =
+            hide_overlays_while_recording() ? recording_overlay_mode : -1;
+        if (recording_overlay_now != recording_overlay_prev)
         {
             BMP_LOCK(
                 clrscr_mirror();
                 clrscr();
             )
             crop_set_dirty(1);
-            hide_overlays_prev = hide_overlays_now;
+#ifdef CONFIG_ELECTRONIC_LEVEL
+            if (recording_overlay_prev >= 2 &&
+                recording_overlay_now < 2 &&
+                !electronic_level)
+                disable_electronic_level();
+#endif
+            recording_overlay_prev = recording_overlay_now;
         }
 #endif
         
@@ -4547,6 +4616,10 @@ livev_hipriority_task( void* unused )
 
         if (hide_overlays_while_recording())
         {
+#ifdef CONFIG_ELECTRONIC_LEVEL
+            if (recording_overlay_show_level() && k % 2)
+                BMP_LOCK( if (lv) show_electronic_level(); )
+#endif
             msleep(100);
             continue;
         }

@@ -333,13 +333,27 @@ cropmark_draw()
         if (cropmarks_frame_changed())
             cropmarks_clear_last_frame();
 
-        bvram_mirror_clear();
-        cropmarks_draw_frame();
-        cropmarks_frame_save();
-        cropmark_cache_dirty = 1;
-        zoom_overlay_dirty = 1;
-        crop_dirty = 0;
-        return;
+        if (!recording_overlay_show_border())
+        {
+            bvram_mirror_clear();
+            cropmarks_frame_save();
+            cropmark_cache_dirty = 1;
+            zoom_overlay_dirty = 1;
+            crop_dirty = 0;
+            return;
+        }
+
+        if (!recording_overlay_show_cropmarks())
+        {
+            bvram_mirror_clear();
+            default_movie_cropmarks();
+            cropmark_draw_from_cache();
+            cropmarks_frame_save();
+            cropmark_cache_dirty = 1;
+            zoom_overlay_dirty = 1;
+            crop_dirty = 0;
+            return;
+        }
     }
 
     if (cropmarks_frame_changed())
