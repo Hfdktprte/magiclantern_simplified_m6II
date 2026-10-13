@@ -74,6 +74,7 @@
 #include "fileprefix.h"
 #include "timer.h"
 #include "ml-cbr.h"
+#include "crx_encoder.h"
 #include "../../silent/lossless.h"
 #include "ml-cbr.h"
 
@@ -102,6 +103,7 @@ static int cam_700d = 0;
 static int cam_60d = 0;
 static int cam_100d = 0;
 static int cam_1100d = 0;
+static int cam_m6ii = 0;
 
 static int cam_5d3 = 0;
 static int cam_5d3_113 = 0;
@@ -136,7 +138,9 @@ static CONFIG_INT("raw.aspect.ratio", aspect_ratio_index, 10);
 
 static CONFIG_INT("raw.write.speed", measured_write_speed, 0);
 static int measured_write_speeds[CARD_COUNT] = {0};
-static int measured_compression_ratio = 0;
+static int measured_compression_ratio[6] = { 0 };
+static int measured_compression_x[6] = { 0 };
+static int measured_compression_y[6] = { 0 };
 
 static CONFIG_INT("raw.pre-record", pre_record, 0);
 static int pre_record_triggered = 0;    /* becomes 1 once you press REC twice */
@@ -173,6 +177,29 @@ static CONFIG_INT("raw.output_format", output_format, 3);
 #define OUTPUT_12BIT_LOSSLESS 4
 #define OUTPUT_AUTO_BIT_LOSSLESS 5
 #define OUTPUT_COMPRESSION (output_format>2)
+#define OUTPUT_M6II_CRX \
+    (cam_m6ii && output_format == OUTPUT_14BIT_LOSSLESS)
+#define M6II_CRX_PACK_CONTROL    0xD0422224u
+#define M6II_CRX_PHOTO_PACK_MODE 0xC0000021u
+
+static volatile int m6ii_crx_pack_requested;
+static uint32_t m6ii_crx_saved_pack_mode;
+
+static int m6ii_crx_enable_pack(void)
+{
+    m6ii_crx_saved_pack_mode = MEM(M6II_CRX_PACK_CONTROL);
+    m6ii_crx_pack_requested = 1;
+    MEM(M6II_CRX_PACK_CONTROL) = M6II_CRX_PHOTO_PACK_MODE;
+    return MEM(M6II_CRX_PACK_CONTROL) == M6II_CRX_PHOTO_PACK_MODE;
+}
+
+static void m6ii_crx_disable_pack(void)
+{
+    if (!m6ii_crx_pack_requested)
+        return;
+    m6ii_crx_pack_requested = 0;
+    MEM(M6II_CRX_PACK_CONTROL) = m6ii_crx_saved_pack_mode;
+}
 
 /* container BPP (variable for uncompressed, always 14 for lossless JPEG) */
 static const int bpp_container[] = { 14, 12, 10, 14, 14, 14, 14, 14, 14 };
@@ -367,6 +394,24 @@ static struct msg_queue * compress_mq = 0;
 static GUARDED_BY(RawRecTask)   mlv_file_hdr_t file_hdr[CARD_COUNT];
 static GUARDED_BY(RawRecTask)   mlv_rawi_hdr_t rawi_hdr;
 static GUARDED_BY(RawRecTask)   mlv_rawc_hdr_t rawc_hdr;
+
+struct mlv_crxf_hdr
+{
+    uint8_t blockType[4];
+    uint32_t blockSize;
+    uint64_t timestamp;
+    uint8_t codec[4];
+    uint16_t version;
+    uint16_t bits_per_pixel;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride_pixels;
+    uint32_t offset_x;
+    uint32_t offset_y;
+    uint32_t split_path;
+};
+SIZE_CHECK_STRUCT(mlv_crxf_hdr, 0x30);
+static GUARDED_BY(RawRecTask) struct mlv_crxf_hdr crxf_hdr;
 static GUARDED_BY(RawRecTask)   mlv_idnt_hdr_t idnt_hdr;
 static GUARDED_BY(RawRecTask)   mlv_expo_hdr_t expo_hdr;
 static GUARDED_BY(RawRecTask)   mlv_lens_hdr_t lens_hdr;
@@ -806,11 +851,16 @@ static int get_estimated_compression_ratio()
         return 100;
     }
 
-    if (measured_compression_ratio)
+    if (measured_compression_ratio[output_format] &&
+        measured_compression_x[output_format] == res_x &&
+        measured_compression_y[output_format] == res_y)
     {
         /* we have a measurement from a recent frame */
-        return measured_compression_ratio;
+        return measured_compression_ratio[output_format];
     }
+
+    if (OUTPUT_M6II_CRX)
+        return 100;
 
     /* reasonable defaults */
     switch (output_format)
@@ -960,6 +1010,9 @@ int setup_bit_depth()
         return 0;
     }
 
+    if (OUTPUT_M6II_CRX && !m6ii_crx_enable_pack())
+        return 0;
+
     setup_bit_depth_digital_gain(0);
     return 1;
 }
@@ -968,6 +1021,7 @@ int setup_bit_depth()
 static REQUIRES(settings_sem)
 void restore_bit_depth()
 {
+    m6ii_crx_disable_pack();
     raw_lv_request_bpp(14);
     setup_bit_depth_digital_gain(1);
 }
@@ -1032,7 +1086,8 @@ void refresh_raw_settings(int force)
             setup_bit_depth_digital_gain(0);
 
             /* update compression ratio once every 2 seconds */
-            if (OUTPUT_COMPRESSION && compress_mq && should_run_polling_action(2000, &aux2))
+            if (OUTPUT_COMPRESSION && !OUTPUT_M6II_CRX && compress_mq &&
+                should_run_polling_action(2000, &aux2))
             {
                 measure_compression_ratio();
             }
@@ -2781,59 +2836,124 @@ static void compress_task()
 
         if (OUTPUT_COMPRESSION)
         {
-            /* PackMem appears to require stricter memory alignment */
-            ASSERT(((uint32_t)out_ptr & 0x3F) == 0);
-            ASSERT((max_frame_size & 0xFFF) == 0);
-            struct memSuite * outSuite = CreateMemorySuite(out_ptr, max_frame_size, 0);
-            ASSERT(outSuite);
+            int compressed_size;
+            int discard_frame = 0;
 
-            int compressed_size = lossless_compress_raw_rectangle(
-                outSuite, fullSizeBuffer,
-                raw_info.width, (skip_x + 7) & ~7, skip_y & ~1,
-                res_x, res_y
-            );
+            if (OUTPUT_M6II_CRX)
+            {
+                uint32_t crx_size = 0;
+                int crx_error;
+
+                if (raw_info.bits_per_pixel != 14u)
+                {
+                    crx_error = -17;
+                }
+                else
+                {
+                    crx_error = crx_encode_frame(
+                        fullSizeBuffer, raw_info.width, raw_info.height,
+                        raw_info.pitch,
+                        (skip_x + 7) & ~7, skip_y & ~1,
+                        res_x, res_y,
+                        out_ptr, max_frame_size - VIDF_HDR_SIZE - 4,
+                        &crx_size);
+                }
+                compressed_size = crx_error ? crx_error : (int)crx_size;
+            }
+            else
+            {
+                ASSERT(((uint32_t)out_ptr & 0x3F) == 0);
+                ASSERT((max_frame_size & 0xFFF) == 0);
+                struct memSuite * outSuite = CreateMemorySuite(
+                    out_ptr, max_frame_size, 0);
+                ASSERT(outSuite);
+
+                compressed_size = lossless_compress_raw_rectangle(
+                    outSuite, fullSizeBuffer,
+                    raw_info.width, (skip_x + 7) & ~7, skip_y & ~1,
+                    res_x, res_y
+                );
+                DeleteMemorySuite(outSuite);
+            }
 
             /* only report compression errors while recording
              * some of them appear during video mode switches
              * unlikely to cause actual trouble - silence them for now */
             if (compressed_size < 0 && !RAW_IS_IDLE)
             {
-                printf("Compression error %d at frame %d\n", compressed_size, frame_count-1);
-                ASSERT(0);
+                if (OUTPUT_M6II_CRX)
+                {
+                    printf("CRX err %d f%d\n", compressed_size, frame_count-1);
+                    NotifyBox(3000, "CRX err %d", compressed_size);
+                    buffer_full = 1;
+                    compressed_size = 0;
+                    discard_frame = 1;
+                }
+                else
+                {
+                    printf("Compression error %d at frame %d\n",
+                           compressed_size, frame_count-1);
+                    ASSERT(0);
+                }
             }
 
-            DeleteMemorySuite(outSuite);
-
-            if (1)
+            if (compressed_size >= frame_size_uncompressed)
             {
-                if (compressed_size >= frame_size_uncompressed)
+                if (OUTPUT_M6II_CRX)
+                {
+                    printf("CRX did not reduce frame\n");
+                    NotifyBox(3000, "CRX no reduction");
+                    buffer_full = 1;
+                    compressed_size = 0;
+                    discard_frame = 1;
+                }
+                else
                 {
                     printf("\nCompressed size higher than uncompressed - corrupted frame?\n");
                     printf("Please reboot, then decrease vertical resolution in crop_rec menu.\n\n");
                     buffer_full = 1;
                     ASSERT(0);
                 }
-                else if (compressed_size > max_frame_size - VIDF_HDR_SIZE - 4)
+            }
+            else if (compressed_size > max_frame_size - VIDF_HDR_SIZE - 4)
+            {
+                if (OUTPUT_M6II_CRX)
+                {
+                    printf("CRX slot too small\n");
+                    NotifyBox(3000, "CRX slot small");
+                    buffer_full = 1;
+                    compressed_size = 0;
+                    discard_frame = 1;
+                }
+                else
                 {
                     printf("Compressed size too high - too much detail or noise?\n");
                     printf("Consider using uncompressed 10/12-bit.");
                     buffer_full = 1;
                     ASSERT(0);
                 }
-
-                /* resize frame slots on the fly, to compressed size */
-                if (!RAW_IS_IDLE)
-                {
-                    shrink_slot(slot_index, MIN(compressed_size, max_frame_size - VIDF_HDR_SIZE - 4));
-                }
-                
-                /* our old EDMAC check assumes frame sizes known in advance - not the case here */
-                frame_fake_edmac_check(slot_index);
             }
+
+            if (!RAW_IS_IDLE)
+            {
+                int output_size = MIN(
+                    compressed_size, max_frame_size - VIDF_HDR_SIZE - 4);
+                shrink_slot(slot_index, output_size);
+                if (discard_frame)
+                {
+                    slots[slot_index].is_meta = 1;
+                    mlv_set_type((mlv_hdr_t *) slots[slot_index].ptr, "NULL");
+                }
+            }
+
+            frame_fake_edmac_check(slot_index);
 
             if (compressed_size > 0)
             {
-                measured_compression_ratio = (compressed_size/128) * 100 / (frame_size_uncompressed/128);
+                measured_compression_ratio[output_format] =
+                    (compressed_size/128) * 100 / (frame_size_uncompressed/128);
+                measured_compression_x[output_format] = res_x;
+                measured_compression_y[output_format] = res_y;
             }
         }
         else
@@ -2960,7 +3080,10 @@ unsigned int FAST raw_rec_vsync_cbr(unsigned int unused)
     if (!is_movie_mode()) return 0;
 
     hack_liveview_vsync();
- 
+
+    if (m6ii_crx_pack_requested)
+        MEM(M6II_CRX_PACK_CONTROL) = M6II_CRX_PHOTO_PACK_MODE;
+
     /* panning window is updated when recording, but also when not recording */
     panning_update();
 
@@ -3098,7 +3221,8 @@ void init_mlv_chunk_headers(struct raw_info *raw_info)
         file_hdr[i].fileCount = 0; //autodetect
         file_hdr[i].fileFlags = 4;
         file_hdr[i].videoClass = MLV_VIDEO_CLASS_RAW |
-            (OUTPUT_COMPRESSION ? MLV_VIDEO_CLASS_FLAG_LJ92 : 0);
+            (OUTPUT_M6II_CRX ? MLV_VIDEO_CLASS_FLAG_CRX :
+             OUTPUT_COMPRESSION ? MLV_VIDEO_CLASS_FLAG_LJ92 : 0);
         file_hdr[i].audioClass = 0;
         file_hdr[i].videoFrameCount = 0; //autodetect
         file_hdr[i].audioFrameCount = 0;
@@ -3117,6 +3241,25 @@ void init_mlv_chunk_headers(struct raw_info *raw_info)
     rawi_hdr.xRes = res_x;
     rawi_hdr.yRes = res_y;
     rawi_hdr.raw_info = *raw_info;
+
+    if (OUTPUT_M6II_CRX)
+    {
+        rawi_hdr.raw_info.width = res_x;
+        rawi_hdr.raw_info.height = res_y;
+        rawi_hdr.raw_info.frame_size = res_x * res_y * BPP / 8;
+        rawi_hdr.raw_info.buffer = 0;
+
+        memset(&crxf_hdr, 0, sizeof(crxf_hdr));
+        memcpy(crxf_hdr.blockType, "CRXF", 4);
+        crxf_hdr.blockSize = sizeof(crxf_hdr);
+        mlv_set_timestamp((mlv_hdr_t *)&crxf_hdr, mlv_start_timestamp);
+        memcpy(crxf_hdr.codec, "CRX1", 4);
+        crxf_hdr.version = 1;
+        crxf_hdr.bits_per_pixel = BPP;
+        crxf_hdr.width = res_x;
+        crxf_hdr.height = res_y;
+        crxf_hdr.stride_pixels = res_x;
+    }
 
     memset(&rawc_hdr, 0, sizeof(mlv_rawc_hdr_t));
     mlv_set_type((mlv_hdr_t *)&rawc_hdr, "RAWC");
@@ -3172,6 +3315,8 @@ int write_mlv_chunk_headers(FILE *f, int chunk, int card_index)
     if(chunk == 0)
     {
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&rawi_hdr);
+        if (OUTPUT_M6II_CRX)
+            fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&crxf_hdr);
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&rawc_hdr);
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&idnt_hdr);
         fail |= !mlv_write_hdr(f, (mlv_hdr_t *)&expo_hdr);
@@ -4539,6 +4684,7 @@ static unsigned int raw_rec_init()
     cam_100d  = is_camera("100D", "1.0.1");
     cam_500d  = is_camera("500D", "1.1.1");
     cam_1100d = is_camera("1100D", "1.0.5");
+    cam_m6ii  = is_camera("M6II", "1.1.1");
 
     cam_5d3_113 = is_camera("5D3",  "1.1.3");
     cam_5d3_123 = is_camera("5D3",  "1.2.3");
@@ -4577,7 +4723,7 @@ static unsigned int raw_rec_init()
         raw_video_menu->children[11].shidden = 1; // Hide "Small hacks"
         small_hacks = 0;
     }
-    if (version != 5)
+    if (version != 5 && !cam_m6ii)
     { // so far, only Digic 5 has working lossless compression, hide on other cams
         if (raw_video_menu->children[2].max > 2)
         {
@@ -4585,6 +4731,15 @@ static unsigned int raw_rec_init()
             if (output_format > 2)
                 output_format = 0;
         }
+    }
+    else if (cam_m6ii)
+    {
+        raw_video_menu->children[2].max = OUTPUT_14BIT_LOSSLESS;
+        raw_video_menu->children[2].help2 =
+            "14-bit, 12-bit and 10-bit uncompressed.\n"
+            "14-bit lossless uses Canon hardware CRX.";
+        if (output_format > OUTPUT_14BIT_LOSSLESS)
+            output_format = OUTPUT_14BIT_NATIVE;
     }
 
     menu_add("Movie", raw_video_menu, COUNT(raw_video_menu));
@@ -4619,13 +4774,14 @@ static unsigned int raw_rec_init()
     if (is_card_spanning_possible)
         write_queue_sem = create_named_semaphore("queue_sem", SEM_CREATE_UNLOCKED);
 
-    ASSERT(((uint32_t)task_create("compress_task", 0x0F, 0x1000, compress_task, (void*)0) & 1) == 0);
+    ASSERT(((uint32_t)task_create("compress_task", 0x0F, 0x8000, compress_task, (void*)0) & 1) == 0);
 
     return 0;
 }
 
 static unsigned int raw_rec_deinit()
 {
+    m6ii_crx_disable_pack();
     return 0;
 }
 

@@ -209,6 +209,10 @@ THUMB_FN(0xe0818adc, _LoadCalendarFromRTC)
 THUMB_FN(0xe08f942e, ErrForCamera_handler)
 
 THUMB_FN(0xe0599c42,  dm_set_store_level)
+THUMB_FN(0xe06662f6,  algsmgr_start_encode)
+THUMB_FN(0xe0666778,  algsmgr_get_ring_list)
+THUMB_FN(0xe066682a,  algsmgr_get_main_buffer)
+THUMB_FN(0xe0666872,  algsmgr_free_enc_buffer)
 
 /** Properties **/
 THUMB_FN(0xe058c8dc, _prop_cleanup)

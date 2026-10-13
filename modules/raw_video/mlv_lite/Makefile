@@ -1,6 +1,7 @@
 # define the module name - make sure name is max 8 characters
 MODULE_NAME = mlv_lite
 MODULE_OBJS = $(BUILD_DIR)/mlv_lite.o \
+              $(BUILD_DIR)/crx_encoder.o \
               $(BUILD_DIR)/mlv.o \
               $(BUILD_DIR)/lossless.o
 TOP_DIR = ../../..
